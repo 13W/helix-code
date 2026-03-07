@@ -59,6 +59,8 @@ pub struct Client {
     /// Accumulates text chunks from `session/update` AgentMessageChunk notifications
     /// during an ongoing prompt turn. Cleared at the start of each new prompt.
     pub response_buf: String,
+    /// True while a `session/prompt` job is in flight. Used by AgentPanel to show spinner.
+    pub is_prompting: bool,
 }
 
 impl Client {
@@ -115,6 +117,7 @@ impl Client {
             capabilities: None,
             session_id: None,
             response_buf: String::new(),
+            is_prompting: false,
         };
 
         Ok((client, rx))

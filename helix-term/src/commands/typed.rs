@@ -2937,32 +2937,39 @@ fn agent_prompt(
         (session_id, client.handle())
     };
 
-    cx.editor.acp.get_mut(agent_id).unwrap().response_buf.clear();
+    {
+        let client = cx.editor.acp.get_mut(agent_id).unwrap();
+        client.response_buf.clear();
+        client.is_prompting = true;
+    }
 
     let prompt = vec![helix_acp::ContentBlock::Text { text: prompt_text }];
 
+    // Push the panel immediately so it appears before the first chunk arrives.
     cx.jobs.callback(async move {
         use crate::job::Callback;
-        let stop = handle
+        Ok(Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+            compositor.replace_or_push(
+                crate::ui::AgentPanel::ID,
+                crate::ui::AgentPanel::new(agent_id),
+            );
+        })))
+    });
+
+    // Session prompt job — clears is_prompting on completion.
+    let handle2 = handle.clone();
+    cx.jobs.callback(async move {
+        use crate::job::Callback;
+        let stop = handle2
             .session_prompt(session_id, prompt)
             .await
             .map_err(|e| anyhow::anyhow!("agent prompt failed: {e}"))?;
-        Ok(Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, _compositor| {
-                let response = editor
-                    .acp
-                    .get(agent_id)
-                    .map(|c| c.response_buf.trim().to_owned())
-                    .unwrap_or_default();
-                let display = if response.is_empty() {
-                    format!("Agent done ({stop:?})")
-                } else {
-                    response
-                };
-                editor.autoinfo =
-                    Some(helix_view::info::Info::new("Agent", &[("", display.as_str())]));
-            },
-        )))
+        Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
+            if let Some(client) = editor.acp.get_mut(agent_id) {
+                client.is_prompting = false;
+            }
+            editor.set_status(format!("Agent done ({stop:?})"));
+        })))
     });
 
     cx.editor.set_status("Agent thinking…");
