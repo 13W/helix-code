@@ -236,6 +236,11 @@ impl Client {
         let _ = self.server_tx.send(Payload::Response(output));
     }
 
+    /// Return a cloneable sender for use in `'static` callbacks.
+    pub fn sender(&self) -> UnboundedSender<Payload> {
+        self.server_tx.clone()
+    }
+
     // ------------------------------------------------------------------
     // ACP lifecycle methods
     // ------------------------------------------------------------------
