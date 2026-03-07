@@ -403,6 +403,49 @@ impl Client {
                         | CallHierarchyServerCapability::Options(_)
                 )
             ),
+            LanguageServerFeature::SelectionRange => matches!(
+                capabilities.selection_range_provider,
+                Some(
+                    SelectionRangeProviderCapability::Simple(true)
+                        | SelectionRangeProviderCapability::Options(_)
+                        | SelectionRangeProviderCapability::RegistrationOptions(_),
+                )
+            ),
+            LanguageServerFeature::WillSave => matches!(
+                capabilities.text_document_sync,
+                Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
+                    will_save: Some(true),
+                    ..
+                }))
+            ),
+            LanguageServerFeature::WillSaveWaitUntil => matches!(
+                capabilities.text_document_sync,
+                Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
+                    will_save_wait_until: Some(true),
+                    ..
+                }))
+            ),
+            LanguageServerFeature::OnTypeFormatting => {
+                capabilities.document_on_type_formatting_provider.is_some()
+            }
+            LanguageServerFeature::WorkspaceDiagnostics => matches!(
+                capabilities.diagnostic_provider,
+                Some(
+                    DiagnosticServerCapabilities::Options(DiagnosticOptions {
+                        workspace_diagnostics: true,
+                        ..
+                    })
+                    | DiagnosticServerCapabilities::RegistrationOptions(
+                        DiagnosticRegistrationOptions {
+                            diagnostic_options: DiagnosticOptions {
+                                workspace_diagnostics: true,
+                                ..
+                            },
+                            ..
+                        },
+                    )
+                )
+            ),
         }
     }
 
@@ -589,13 +632,16 @@ impl Client {
                     apply_edit: Some(true),
                     symbol: Some(lsp::WorkspaceSymbolClientCapabilities {
                         dynamic_registration: Some(false),
+                        resolve_support: Some(lsp::WorkspaceSymbolResolveSupportCapability {
+                            properties: vec!["location.range".to_string()],
+                        }),
                         ..Default::default()
                     }),
                     execute_command: Some(lsp::DynamicRegistrationClientCapabilities {
                         dynamic_registration: Some(false),
                     }),
                     inlay_hint: Some(lsp::InlayHintWorkspaceClientCapabilities {
-                        refresh_support: Some(false),
+                        refresh_support: Some(true),
                     }),
                     workspace_edit: Some(lsp::WorkspaceEditClientCapabilities {
                         document_changes: Some(true),
@@ -613,9 +659,13 @@ impl Client {
                         relative_pattern_support: Some(true),
                     }),
                     file_operations: Some(lsp::WorkspaceFileOperationsClientCapabilities {
+                        dynamic_registration: Some(false),
+                        will_create: Some(true),
+                        did_create: Some(true),
                         will_rename: Some(true),
                         did_rename: Some(true),
-                        ..Default::default()
+                        will_delete: Some(true),
+                        did_delete: Some(true),
                     }),
                     diagnostic: Some(lsp::DiagnosticWorkspaceClientCapabilities {
                         refresh_support: Some(true),
@@ -721,6 +771,17 @@ impl Client {
                         tooltip_support: Some(false),
                     }),
                     call_hierarchy: Some(lsp::DynamicRegistrationClientCapabilities {
+                        dynamic_registration: Some(false),
+                    }),
+                    synchronization: Some(lsp::TextDocumentSyncClientCapabilities {
+                        will_save: Some(true),
+                        will_save_wait_until: Some(true),
+                        ..Default::default()
+                    }),
+                    selection_range: Some(lsp::SelectionRangeClientCapabilities {
+                        dynamic_registration: Some(false),
+                    }),
+                    on_type_formatting: Some(lsp::DocumentOnTypeFormattingClientCapabilities {
                         dynamic_registration: Some(false),
                     }),
                     ..Default::default()
@@ -844,6 +905,92 @@ impl Client {
             new_uri: url_from_path(new_path)?,
         }];
         self.notify::<lsp::notification::DidRenameFiles>(lsp::RenameFilesParams { files });
+        Some(())
+    }
+
+    pub fn will_create_files(
+        &self,
+        paths: &[&Path],
+    ) -> Option<impl Future<Output = Result<Option<lsp::WorkspaceEdit>>>> {
+        let capabilities = self.file_operations_intests();
+        let files: Vec<_> = paths
+            .iter()
+            .filter_map(|&path| {
+                if !capabilities.will_create.has_interest(path, false) {
+                    return None;
+                }
+                let uri = Url::from_file_path(path).ok()?.to_string();
+                Some(lsp::FileCreate { uri })
+            })
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        Some(self.call_with_timeout::<lsp::request::WillCreateFiles>(
+            &lsp::CreateFilesParams { files },
+            5,
+        ))
+    }
+
+    pub fn did_create_files(&self, paths: &[&Path]) -> Option<()> {
+        let capabilities = self.file_operations_intests();
+        let files: Vec<_> = paths
+            .iter()
+            .filter_map(|&path| {
+                if !capabilities.did_create.has_interest(path, false) {
+                    return None;
+                }
+                let uri = Url::from_file_path(path).ok()?.to_string();
+                Some(lsp::FileCreate { uri })
+            })
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        self.notify::<lsp::notification::DidCreateFiles>(lsp::CreateFilesParams { files });
+        Some(())
+    }
+
+    pub fn will_delete_files(
+        &self,
+        paths: &[&Path],
+    ) -> Option<impl Future<Output = Result<Option<lsp::WorkspaceEdit>>>> {
+        let capabilities = self.file_operations_intests();
+        let files: Vec<_> = paths
+            .iter()
+            .filter_map(|&path| {
+                if !capabilities.will_delete.has_interest(path, false) {
+                    return None;
+                }
+                let uri = Url::from_file_path(path).ok()?.to_string();
+                Some(lsp::FileDelete { uri })
+            })
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        Some(self.call_with_timeout::<lsp::request::WillDeleteFiles>(
+            &lsp::DeleteFilesParams { files },
+            5,
+        ))
+    }
+
+    pub fn did_delete_files(&self, paths: &[&Path]) -> Option<()> {
+        let capabilities = self.file_operations_intests();
+        let files: Vec<_> = paths
+            .iter()
+            .filter_map(|&path| {
+                if !capabilities.did_delete.has_interest(path, false) {
+                    return None;
+                }
+                let uri = Url::from_file_path(path).ok()?.to_string();
+                Some(lsp::FileDelete { uri })
+            })
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        self.notify::<lsp::notification::DidDeleteFiles>(lsp::DeleteFilesParams { files });
         Some(())
     }
 
@@ -1093,6 +1240,19 @@ impl Client {
         completion_item: &lsp::CompletionItem,
     ) -> impl Future<Output = Result<lsp::CompletionItem>> {
         self.call_with_ref::<lsp::request::ResolveCompletionItem>(completion_item)
+    }
+
+    pub fn resolve_inlay_hint(
+        &self,
+        hint: &lsp::InlayHint,
+    ) -> Option<impl Future<Output = Result<lsp::InlayHint>>> {
+        let capabilities = self.capabilities.get().unwrap();
+        match &capabilities.inlay_hint_provider {
+            Some(lsp::OneOf::Right(lsp::InlayHintServerCapabilities::Options(opts)))
+                if opts.resolve_provider == Some(true) => {}
+            _ => return None,
+        }
+        Some(self.call_with_ref::<lsp::request::InlayHintResolveRequest>(hint))
     }
 
     pub fn resolve_code_action(
@@ -1636,6 +1796,13 @@ impl Client {
         Some(self.call::<lsp::request::WorkspaceSymbolRequest>(params))
     }
 
+    pub fn resolve_workspace_symbol(
+        &self,
+        symbol: &lsp::WorkspaceSymbol,
+    ) -> impl Future<Output = Result<lsp::WorkspaceSymbol>> {
+        self.call_with_ref::<lsp::request::WorkspaceSymbolResolve>(symbol)
+    }
+
     pub fn code_actions(
         &self,
         text_document: lsp::TextDocumentIdentifier,
@@ -1712,5 +1879,77 @@ impl Client {
         self.notify::<lsp::notification::DidChangeWatchedFiles>(lsp::DidChangeWatchedFilesParams {
             changes,
         })
+    }
+
+    pub fn selection_range(
+        &self,
+        text_document: lsp::TextDocumentIdentifier,
+        positions: Vec<lsp::Position>,
+    ) -> impl Future<Output = Result<Option<Vec<lsp::SelectionRange>>>> {
+        let params = lsp::SelectionRangeParams {
+            text_document,
+            positions,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        self.call::<lsp::request::SelectionRangeRequest>(params)
+    }
+
+    pub fn text_document_will_save(
+        &self,
+        text_document: lsp::TextDocumentIdentifier,
+        reason: lsp::TextDocumentSaveReason,
+    ) {
+        self.notify::<lsp::notification::WillSaveTextDocument>(lsp::WillSaveTextDocumentParams {
+            text_document,
+            reason,
+        });
+    }
+
+    pub fn text_document_will_save_wait_until(
+        &self,
+        text_document: lsp::TextDocumentIdentifier,
+        reason: lsp::TextDocumentSaveReason,
+    ) -> impl Future<Output = Result<Option<Vec<lsp::TextEdit>>>> {
+        self.call::<lsp::request::WillSaveWaitUntil>(lsp::WillSaveTextDocumentParams {
+            text_document,
+            reason,
+        })
+    }
+
+    pub fn on_type_formatting(
+        &self,
+        text_document: lsp::TextDocumentIdentifier,
+        position: lsp::Position,
+        ch: char,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> impl Future<Output = Result<Option<Vec<lsp::TextEdit>>>> {
+        let params = lsp::DocumentOnTypeFormattingParams {
+            text_document_position: lsp::TextDocumentPositionParams {
+                text_document,
+                position,
+            },
+            ch: ch.to_string(),
+            options: lsp::FormattingOptions {
+                tab_size,
+                insert_spaces,
+                ..Default::default()
+            },
+        };
+        self.call::<lsp::request::OnTypeFormatting>(params)
+    }
+
+    pub fn workspace_diagnostic(
+        &self,
+        previous_result_ids: Vec<lsp::PreviousResultId>,
+    ) -> impl Future<Output = Result<lsp::WorkspaceDiagnosticReportResult>> {
+        let params = lsp::WorkspaceDiagnosticParams {
+            identifier: None,
+            previous_result_ids,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        self.call::<lsp::request::WorkspaceDiagnosticRequest>(params)
     }
 }
