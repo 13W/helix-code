@@ -44,6 +44,24 @@ impl AgentConfig {
     }
 }
 
+/// A single entry in the agent panel display buffer.
+///
+/// Pushed by `handle_acp_message` for every `SessionUpdate` variant.
+/// Rendered by `AgentPanel` with per-kind styles.
+#[derive(Debug, Clone)]
+pub enum DisplayLine {
+    /// Normal assistant text (may span multiple physical lines).
+    Text(String),
+    /// Internal thought chain — rendered dimmed.
+    Thought(String),
+    /// Tool call started: shows tool name while in progress.
+    ToolCall { id: String, name: String },
+    /// Tool call finished — replaces the matching `ToolCall` entry in-place.
+    ToolDone { id: String, status: String },
+    /// Plan step from a `PlanUpdate`.
+    PlanStep { done: bool, description: String },
+}
+
 /// An ACP agent client connected via stdio.
 #[derive(Debug)]
 pub struct Client {
@@ -56,9 +74,9 @@ pub struct Client {
     pub capabilities: Option<AgentCapabilities>,
     /// The active session ID, set after `session_new()` or `session_load()`.
     pub session_id: Option<SessionId>,
-    /// Accumulates text chunks from `session/update` AgentMessageChunk notifications
-    /// during an ongoing prompt turn. Cleared at the start of each new prompt.
-    pub response_buf: String,
+    /// Structured display buffer, accumulated from `session/update` notifications.
+    /// Cleared at the start of each new prompt.
+    pub display: Vec<DisplayLine>,
     /// True while a `session/prompt` job is in flight. Used by AgentPanel to show spinner.
     pub is_prompting: bool,
 }
@@ -116,7 +134,7 @@ impl Client {
             request_counter: Arc::new(AtomicU64::new(0)),
             capabilities: None,
             session_id: None,
-            response_buf: String::new(),
+            display: Vec::new(),
             is_prompting: false,
         };
 
@@ -353,6 +371,22 @@ impl Client {
             request_counter: Arc::clone(&self.request_counter),
         }
     }
+
+
+    /// Concatenate all [`DisplayLine::Text`] entries into a single string.
+    /// Used for tests and for producing a plain-text fallback.
+    pub fn response_text(&self) -> String {
+        self.display
+            .iter()
+            .filter_map(|l| {
+                if let DisplayLine::Text(s) = l {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +439,26 @@ impl ClientHandle {
         serde_json::from_value(value).map_err(Into::into)
     }
 
+    /// Send a fire-and-forget notification (no response expected).
+    fn notify(&self, method: &str, params: impl Serialize) -> Result<()> {
+        let params_value = serde_json::to_value(&params)?;
+        let params = match params_value {
+            Value::Object(map) => jsonrpc::Params::Map(map),
+            Value::Array(arr) => jsonrpc::Params::Array(arr),
+            Value::Null => jsonrpc::Params::None,
+            other => jsonrpc::Params::Array(vec![other]),
+        };
+        let notification = jsonrpc::Notification {
+            jsonrpc: Some(jsonrpc::Version::V2),
+            method: method.to_owned(),
+            params,
+        };
+        self.server_tx
+            .send(Payload::Notification(notification))
+            .map_err(|_| Error::StreamClosed)?;
+        Ok(())
+    }
+
     /// Run the initialize handshake. Returns the result to store on the Client.
     pub async fn initialize(&self) -> Result<InitializeResult> {
         let params = InitializeParams {
@@ -450,5 +504,10 @@ impl ClientHandle {
             .call("session/prompt", PromptParams { session_id, prompt })
             .await?;
         Ok(result.stop_reason)
+    }
+
+    /// Cancel an ongoing prompt turn (fire-and-forget notification).
+    pub fn session_cancel(&self, session_id: SessionId) -> Result<()> {
+        self.notify("session/cancel", CancelParams { session_id })
     }
 }
