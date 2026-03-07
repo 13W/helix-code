@@ -24,7 +24,7 @@ use crate::{
     compositor::{Compositor, Event},
     config::Config,
     handlers,
-    job::Jobs,
+    job::{Callback, Jobs},
     keymap::Keymaps,
     ui::{self, overlay::overlaid},
 };
@@ -140,15 +140,14 @@ impl Application {
         );
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
-        Self::start_configured_agents(&mut editor);
+        let mut jobs = Jobs::new();
+        Self::start_configured_agents(&mut editor, &mut jobs);
 
         let keys = Box::new(Map::new(Arc::clone(&config), |config: &Config| {
             &config.keys
         }));
         let editor_view = Box::new(ui::EditorView::new(Keymaps::new(keys)));
         compositor.push(editor_view);
-
-        let jobs = Jobs::new();
 
         if args.load_tutor {
             let path = helix_loader::runtime_file(Path::new("tutor"));
@@ -706,8 +705,24 @@ impl Application {
         match call {
             Call::Notification(notif) => match notif.method.as_str() {
                 "session/update" => {
-                    // TODO Phase 4: stream chunks to UI
-                    log::debug!("ACP {agent_id}: session/update");
+                    use helix_acp::types::{ContentBlock, SessionUpdate, SessionUpdateParams};
+                    if let Ok(params) = notif.params.parse::<SessionUpdateParams>() {
+                        if let SessionUpdate::AgentMessageChunk { content } = params.update {
+                            let text: String = content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
+                            if !text.is_empty() {
+                                if let Some(client) = self.editor.acp.get_mut(agent_id) {
+                                    client.response_buf.push_str(&text);
+                                }
+                            }
+                        }
+                    }
                 }
                 "$/disconnected" => {
                     log::info!("ACP agent {agent_id} disconnected");
@@ -812,7 +827,7 @@ impl Application {
         }
     }
 
-    fn start_configured_agents(editor: &mut Editor) {
+    fn start_configured_agents(editor: &mut Editor, jobs: &mut Jobs) {
         let loader = editor.syn_loader.load();
         for agent_cfg in loader.agent_configurations() {
             if !agent_cfg.enabled {
@@ -826,6 +841,26 @@ impl Application {
             match editor.acp.start_agent(&config) {
                 Ok(id) => {
                     log::info!("ACP: started agent '{}' ({id})", agent_cfg.name);
+                    let handle = editor.acp.get(id).unwrap().handle();
+                    let name = agent_cfg.name.clone();
+                    jobs.callback(async move {
+                        let init_result = handle.initialize().await.map_err(|e| {
+                            anyhow::anyhow!("ACP agent '{name}' init failed: {e}")
+                        })?;
+                        let session_result = handle.session_new().await.map_err(|e| {
+                            anyhow::anyhow!("ACP agent '{name}' session failed: {e}")
+                        })?;
+                        let caps = init_result.capabilities;
+                        let sid = session_result.session_id;
+                        Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
+                            if let Some(client) = editor.acp.get_mut(id) {
+                                client.capabilities = Some(caps);
+                                client.session_id = Some(sid.clone());
+                            }
+                            log::info!("ACP: agent '{name}' ready (session={sid})");
+                            editor.set_status(format!("ACP: agent '{name}' ready"));
+                        })))
+                    });
                 }
                 Err(e) => log::error!("ACP: failed to start agent '{}': {e}", agent_cfg.name),
             }
