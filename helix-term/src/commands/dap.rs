@@ -730,6 +730,137 @@ pub fn dap_switch_thread(cx: &mut Context) {
         block_on(select_thread_id(editor, thread.id, true));
     })
 }
+pub fn dap_set_function_breakpoint(cx: &mut Context) {
+    let debugger = debugger!(cx.editor);
+
+    if !debugger
+        .caps
+        .as_ref()
+        .is_some_and(|c| c.supports_function_breakpoints.unwrap_or_default())
+    {
+        cx.editor
+            .set_error("Debugger does not support function breakpoints");
+        return;
+    }
+
+    let callback = Box::pin(async move {
+        let call: Callback = Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+            let prompt = Prompt::new(
+                "function name:".into(),
+                None,
+                ui::completers::none,
+                move |cx, input: &str, event: PromptEvent| {
+                    if event != PromptEvent::Validate {
+                        return;
+                    }
+                    if input.is_empty() {
+                        return;
+                    }
+                    let debugger = debugger!(cx.editor);
+                    let bp = dap::FunctionBreakpoint {
+                        name: input.to_owned(),
+                        condition: None,
+                        hit_condition: None,
+                    };
+                    match block_on(debugger.set_function_breakpoints(vec![bp])) {
+                        Ok(_) => cx.editor.set_status("Function breakpoint set"),
+                        Err(e) => cx
+                            .editor
+                            .set_error(format!("Failed to set function breakpoint: {}", e)),
+                    }
+                },
+            );
+            compositor.push(Box::new(prompt));
+        }));
+        Ok(call)
+    });
+    cx.jobs.callback(callback);
+}
+
+pub fn dap_set_variable(cx: &mut Context) {
+    let debugger = debugger!(cx.editor);
+
+    if !debugger
+        .caps
+        .as_ref()
+        .is_some_and(|c| c.supports_set_variable.unwrap_or_default())
+    {
+        cx.editor
+            .set_error("Debugger does not support setting variables");
+        return;
+    }
+
+    let (frame, thread_id) = match (debugger.active_frame, debugger.thread_id) {
+        (Some(frame), Some(thread_id)) => (frame, thread_id),
+        _ => {
+            cx.editor
+                .set_status("Cannot find current stack frame to access variables.");
+            return;
+        }
+    };
+
+    let frame_id = match debugger
+        .stack_frames
+        .get(&thread_id)
+        .and_then(|f| f.get(frame))
+    {
+        Some(f) => f.id,
+        None => return,
+    };
+
+    let scopes = match block_on(debugger.scopes(frame_id)) {
+        Ok(s) => s,
+        Err(e) => {
+            cx.editor
+                .set_error(format!("Failed to get scopes: {}", e));
+            return;
+        }
+    };
+
+    let variables_reference = match scopes.first() {
+        Some(scope) => scope.variables_reference,
+        None => {
+            cx.editor.set_status("No scopes available.");
+            return;
+        }
+    };
+
+    let callback = Box::pin(async move {
+        let call: Callback = Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+            let prompt = Prompt::new(
+                "variable=value:".into(),
+                None,
+                ui::completers::none,
+                move |cx, input: &str, event: PromptEvent| {
+                    if event != PromptEvent::Validate {
+                        return;
+                    }
+                    let Some((name, value)) = input.split_once('=') else {
+                        cx.editor.set_error("Expected format: variable=value");
+                        return;
+                    };
+                    let debugger = debugger!(cx.editor);
+                    match block_on(debugger.set_variable(
+                        variables_reference,
+                        name.to_owned(),
+                        value.to_owned(),
+                    )) {
+                        Ok(resp) => cx
+                            .editor
+                            .set_status(format!("{} = {}", name, resp.value)),
+                        Err(e) => cx
+                            .editor
+                            .set_error(format!("Failed to set variable: {}", e)),
+                    }
+                },
+            );
+            compositor.push(Box::new(prompt));
+        }));
+        Ok(call)
+    });
+    cx.jobs.callback(callback);
+}
+
 pub fn dap_switch_stack_frame(cx: &mut Context) {
     let debugger = debugger!(cx.editor);
 
