@@ -2894,6 +2894,81 @@ const WRITE_NO_FORMAT_FLAG: Flag = Flag {
     ..Flag::DEFAULT
 };
 
+fn agent_prompt(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let (agent_id, prompt_text) = {
+        let registry = &cx.editor.acp;
+        if args.is_empty() {
+            bail!("usage: agent-prompt [agent-name] <text>");
+        }
+        let first: &str = &args[0];
+        if let Some((id, _)) = registry.iter().find(|(_, c)| c.name == first) {
+            let text = (1..args.len()).map(|i| args[i].as_ref()).collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                bail!("prompt text is empty");
+            }
+            (id, text)
+        } else {
+            let (id, _) = registry
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("no ACP agents are running"))?;
+            (id, args.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(" "))
+        }
+    };
+
+    let (session_id, handle) = {
+        let client = cx
+            .editor
+            .acp
+            .get(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+        let session_id = client
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("agent is still initializing — please wait"))?;
+        (session_id, client.handle())
+    };
+
+    cx.editor.acp.get_mut(agent_id).unwrap().response_buf.clear();
+
+    let prompt = vec![helix_acp::ContentBlock::Text { text: prompt_text }];
+
+    cx.jobs.callback(async move {
+        use crate::job::Callback;
+        let stop = handle
+            .session_prompt(session_id, prompt)
+            .await
+            .map_err(|e| anyhow::anyhow!("agent prompt failed: {e}"))?;
+        Ok(Callback::EditorCompositor(Box::new(
+            move |editor: &mut Editor, _compositor| {
+                let response = editor
+                    .acp
+                    .get(agent_id)
+                    .map(|c| c.response_buf.trim().to_owned())
+                    .unwrap_or_default();
+                let display = if response.is_empty() {
+                    format!("Agent done ({stop:?})")
+                } else {
+                    response
+                };
+                editor.autoinfo =
+                    Some(helix_view::info::Info::new("Agent", &[("", display.as_str())]));
+            },
+        )))
+    });
+
+    cx.editor.set_status("Agent thinking…");
+    Ok(())
+}
+
 pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "exit",
@@ -3991,6 +4066,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         fun: untrust_workspace,
         completer: CommandCompleter::none(),
         signature: Signature { positionals: (0, None), ..Signature::DEFAULT },
+    },
+    TypableCommand {
+        name: "agent-prompt",
+        aliases: &["ap"],
+        doc: "Send a prompt to an ACP agent: agent-prompt [agent-name] <text>",
+        fun: agent_prompt,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, None),
+            ..Signature::DEFAULT
+        },
     }
 ];
 
