@@ -1,3 +1,4 @@
+pub mod agent;
 mod completion;
 mod document;
 pub(crate) mod editor;
@@ -18,6 +19,7 @@ mod text_decorations;
 use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
+pub use agent::AgentPanel;
 pub use completion::Completion;
 pub use editor::EditorView;
 use helix_stdx::rope;
