@@ -203,6 +203,31 @@ impl Editor {
                             None => "Target".to_owned(),
                         };
 
+                        if reason == "exception" {
+                            if let Some(tid) = thread_id {
+                                let debugger = match self.debug_adapters.get_client_mut(id) {
+                                    Some(debugger) => debugger,
+                                    None => return false,
+                                };
+                                let supports_exception_info = debugger
+                                    .caps
+                                    .as_ref()
+                                    .and_then(|c| c.supports_exception_info_request)
+                                    .unwrap_or_default();
+                                if supports_exception_info {
+                                    if let Ok(info) = debugger.exception_info(tid).await {
+                                        let mut exception_status =
+                                            format!("Exception: {}", info.exception_id);
+                                        if let Some(desc) = &info.description {
+                                            write!(exception_status, " — {}", desc).unwrap();
+                                        }
+                                        self.set_status(exception_status);
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+
                         let mut status = format!("{} stopped because of {}", scope, reason);
                         if let Some(desc) = description {
                             write!(status, " {}", desc).unwrap();

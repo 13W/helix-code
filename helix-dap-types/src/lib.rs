@@ -173,6 +173,55 @@ pub struct SourceBreakpoint {
     pub log_message: Option<String>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionBreakpoint {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_type_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluate_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_trace: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataBreakpoint {
+    pub data_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstructionBreakpoint {
+    pub instruction_reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Breakpoint {
@@ -739,6 +788,206 @@ pub mod requests {
         type Arguments = SetExceptionBreakpointsArguments;
         type Result = SetExceptionBreakpointsResponse;
         const COMMAND: &'static str = "setExceptionBreakpoints";
+    }
+
+    // setFunctionBreakpoints
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetFunctionBreakpointsArguments {
+        pub breakpoints: Vec<FunctionBreakpoint>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetFunctionBreakpointsResponse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub breakpoints: Option<Vec<Breakpoint>>,
+    }
+
+    #[derive(Debug)]
+    pub enum SetFunctionBreakpoints {}
+
+    impl Request for SetFunctionBreakpoints {
+        type Arguments = SetFunctionBreakpointsArguments;
+        type Result = SetFunctionBreakpointsResponse;
+        const COMMAND: &'static str = "setFunctionBreakpoints";
+    }
+
+    // setVariable
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetVariableArguments {
+        pub variables_reference: usize,
+        pub name: String,
+        pub value: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub format: Option<ValueFormat>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetVariableResponse {
+        pub value: String,
+        #[serde(rename = "type")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub r#type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub variables_reference: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub named_variables: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub indexed_variables: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    pub enum SetVariable {}
+
+    impl Request for SetVariable {
+        type Arguments = SetVariableArguments;
+        type Result = SetVariableResponse;
+        const COMMAND: &'static str = "setVariable";
+    }
+
+    // exceptionInfo
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ExceptionInfoArguments {
+        pub thread_id: ThreadId,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ExceptionInfoResponse {
+        pub exception_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub description: Option<String>,
+        pub break_mode: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub details: Option<ExceptionDetails>,
+    }
+
+    #[derive(Debug)]
+    pub enum ExceptionInfo {}
+
+    impl Request for ExceptionInfo {
+        type Arguments = ExceptionInfoArguments;
+        type Result = ExceptionInfoResponse;
+        const COMMAND: &'static str = "exceptionInfo";
+    }
+
+    // source
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SourceArguments {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub source: Option<super::Source>,
+        pub source_reference: usize,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SourceResponse {
+        pub content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub mime_type: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub enum SourceRequest {}
+
+    impl Request for SourceRequest {
+        type Arguments = SourceArguments;
+        type Result = SourceResponse;
+        const COMMAND: &'static str = "source";
+    }
+
+    // setExpression
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetExpressionArguments {
+        pub expression: String,
+        pub value: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub frame_id: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub format: Option<ValueFormat>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetExpressionResponse {
+        pub value: String,
+        #[serde(rename = "type")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub r#type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub presentation_hint: Option<VariablePresentationHint>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub variables_reference: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub named_variables: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub indexed_variables: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    pub enum SetExpression {}
+
+    impl Request for SetExpression {
+        type Arguments = SetExpressionArguments;
+        type Result = SetExpressionResponse;
+        const COMMAND: &'static str = "setExpression";
+    }
+
+    // setDataBreakpoints
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetDataBreakpointsArguments {
+        pub breakpoints: Vec<DataBreakpoint>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetDataBreakpointsResponse {
+        pub breakpoints: Vec<Breakpoint>,
+    }
+
+    #[derive(Debug)]
+    pub enum SetDataBreakpoints {}
+
+    impl Request for SetDataBreakpoints {
+        type Arguments = SetDataBreakpointsArguments;
+        type Result = SetDataBreakpointsResponse;
+        const COMMAND: &'static str = "setDataBreakpoints";
+    }
+
+    // setInstructionBreakpoints
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetInstructionBreakpointsArguments {
+        pub breakpoints: Vec<InstructionBreakpoint>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetInstructionBreakpointsResponse {
+        pub breakpoints: Vec<Breakpoint>,
+    }
+
+    #[derive(Debug)]
+    pub enum SetInstructionBreakpoints {}
+
+    impl Request for SetInstructionBreakpoints {
+        type Arguments = SetInstructionBreakpointsArguments;
+        type Result = SetInstructionBreakpointsResponse;
+        const COMMAND: &'static str = "setInstructionBreakpoints";
     }
 
     // Reverse Requests
