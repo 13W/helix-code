@@ -18,6 +18,8 @@ pub struct Configuration {
     pub language: Vec<LanguageConfiguration>,
     #[serde(default)]
     pub language_server: HashMap<String, LanguageServerConfiguration>,
+    #[serde(default)]
+    pub agent: Vec<AgentConfiguration>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -455,6 +457,27 @@ pub struct LanguageServerConfiguration {
     pub timeout: u64,
     #[serde(default)]
     pub required_root_patterns: Option<GlobSet>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AgentConfiguration {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub environment: HashMap<String, String>,
+    /// Whether this agent is started automatically on editor launch. Default: true.
+    #[serde(default = "default_agent_enabled")]
+    pub enabled: bool,
+}
+
+fn default_agent_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

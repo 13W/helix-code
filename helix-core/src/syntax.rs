@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use arc_swap::{ArcSwap, Guard};
-use config::{Configuration, FileType, LanguageConfiguration, LanguageServerConfiguration};
+use config::{AgentConfiguration, Configuration, FileType, LanguageConfiguration, LanguageServerConfiguration};
 use foldhash::HashSet;
 use helix_loader::grammar::get_language;
 use helix_stdx::rope::RopeSliceExt as _;
@@ -278,6 +278,7 @@ pub struct Loader {
     languages_by_shebang: HashMap<String, Language>,
     languages_glob_matcher: FileTypeGlobMatcher,
     language_server_configs: HashMap<String, LanguageServerConfiguration>,
+    agent_configurations: Vec<AgentConfiguration>,
     scopes: ArcSwap<Vec<String>>,
 }
 
@@ -317,6 +318,7 @@ impl Loader {
             languages_by_shebang,
             languages_glob_matcher: FileTypeGlobMatcher::new(file_type_globs)?,
             language_server_configs: config.language_server,
+            agent_configurations: config.agent,
             scopes: ArcSwap::from_pointee(Vec::new()),
         })
     }
@@ -426,6 +428,10 @@ impl Loader {
 
     pub fn language_server_configs(&self) -> &HashMap<String, LanguageServerConfiguration> {
         &self.language_server_configs
+    }
+
+    pub fn agent_configurations(&self) -> &[AgentConfiguration] {
+        &self.agent_configurations
     }
 
     pub fn scopes(&self) -> Guard<Arc<Vec<String>>> {
