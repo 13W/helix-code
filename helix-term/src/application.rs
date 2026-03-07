@@ -677,7 +677,7 @@ impl Application {
             }
             EditorEvent::AcpMessage((agent_id, call)) => {
                 self.handle_acp_message(agent_id, call).await;
-                helix_event::request_redraw();
+                self.render().await;
             }
             EditorEvent::Redraw => {
                 self.render().await;
@@ -710,18 +710,6 @@ impl Application {
                         DisplayLine,
                     };
 
-                    /// Collect all text from a `ContentBlock` slice into one `String`.
-                    fn collect_text(content: &[ContentBlock]) -> String {
-                        content
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("")
-                    }
-
                     if let Ok(params) = notif.params.parse::<SessionUpdateParams>() {
                         let Some(client) = self.editor.acp.get_mut(agent_id) else {
                             return;
@@ -729,20 +717,22 @@ impl Application {
 
                         match params.update {
                             SessionUpdate::AgentMessageChunk { content } => {
-                                let text = collect_text(&content);
-                                if !text.is_empty() {
-                                    match client.display.last_mut() {
-                                        Some(DisplayLine::Text(s)) => s.push_str(&text),
-                                        _ => client.display.push(DisplayLine::Text(text)),
+                                if let ContentBlock::Text { text } = content {
+                                    if !text.is_empty() {
+                                        match client.display.last_mut() {
+                                            Some(DisplayLine::Text(s)) => s.push_str(&text),
+                                            _ => client.display.push(DisplayLine::Text(text)),
+                                        }
                                     }
                                 }
                             }
                             SessionUpdate::AgentThoughtChunk { content } => {
-                                let text = collect_text(&content);
-                                if !text.is_empty() {
-                                    match client.display.last_mut() {
-                                        Some(DisplayLine::Thought(s)) => s.push_str(&text),
-                                        _ => client.display.push(DisplayLine::Thought(text)),
+                                if let ContentBlock::Text { text } = content {
+                                    if !text.is_empty() {
+                                        match client.display.last_mut() {
+                                            Some(DisplayLine::Thought(s)) => s.push_str(&text),
+                                            _ => client.display.push(DisplayLine::Thought(text)),
+                                        }
                                     }
                                 }
                             }
@@ -775,8 +765,8 @@ impl Application {
                                     });
                                 }
                             }
-                            // AvailableCommandsUpdate / ConfigOptionUpdate / CurrentModeUpdate
-                            // have no visible effect in the panel.
+                            // AvailableCommandsUpdate / ConfigOptionUpdate / CurrentModeUpdate /
+                            // Unknown have no visible effect in the panel.
                             _ => {}
                         }
                         helix_event::request_redraw();
@@ -957,19 +947,61 @@ impl Application {
                     log::info!("ACP: started agent '{}' ({id})", agent_cfg.name);
                     let handle = editor.acp.get(id).unwrap().handle();
                     let name = agent_cfg.name.clone();
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     jobs.callback(async move {
                         let init_result = handle.initialize().await.map_err(|e| {
                             anyhow::anyhow!("ACP agent '{name}' init failed: {e}")
                         })?;
-                        let session_result = handle.session_new().await.map_err(|e| {
+                        let session_result = handle.session_new(cwd).await.map_err(|e| {
                             anyhow::anyhow!("ACP agent '{name}' session failed: {e}")
                         })?;
                         let caps = init_result.capabilities;
+                        let auth_methods = init_result.auth_methods;
                         let sid = session_result.session_id;
+
+                        // Auto-authenticate with CLAUDE_CODE_OAUTH_TOKEN if agent needs auth.
+                        if !auth_methods.is_empty() {
+                            let has_claude_login =
+                                auth_methods.iter().any(|m| m.id == "claude-login");
+                            if has_claude_login {
+                                if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+                                    use helix_acp::types::AuthenticateParams;
+                                    let params = AuthenticateParams {
+                                        extra: serde_json::json!({
+                                            "methodId": "claude-login",
+                                            "token": token
+                                        })
+                                        .as_object()
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    };
+                                    if let Err(e) = handle.authenticate(params).await {
+                                        log::warn!("ACP: '{name}' auth failed: {e}");
+                                        // Don't abort — agent may still work (env token might suffice)
+                                    }
+                                } else {
+                                    // Token not in env — warn the user
+                                    let desc = auth_methods[0]
+                                        .description
+                                        .as_deref()
+                                        .unwrap_or("authentication required")
+                                        .to_owned();
+                                    return Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
+                                        editor.set_warning(format!(
+                                            "ACP: '{name}' needs auth — {desc}"
+                                        ));
+                                    })));
+                                }
+                            }
+                        }
+
                         Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
                             if let Some(client) = editor.acp.get_mut(id) {
                                 client.capabilities = Some(caps);
                                 client.session_id = Some(sid.clone());
+                                client.auth_methods = auth_methods;
                             }
                             log::info!("ACP: agent '{name}' ready (session={sid})");
                             editor.set_status(format!("ACP: agent '{name}' ready"));
