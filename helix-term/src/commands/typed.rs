@@ -2894,6 +2894,64 @@ const WRITE_NO_FORMAT_FLAG: Flag = Flag {
     ..Flag::DEFAULT
 };
 
+/// Resolve the session ID and client handle for `agent_id`.
+/// Shared by `agent_prompt` and `agent_cancel`.
+fn resolve_agent_handle(
+    cx: &mut compositor::Context,
+    agent_id: helix_acp::AgentId,
+) -> anyhow::Result<(helix_acp::SessionId, helix_acp::ClientHandle)> {
+    let client = cx
+        .editor
+        .acp
+        .get(agent_id)
+        .ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    let session_id = client
+        .session_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("agent is still initializing — please wait"))?;
+    Ok((session_id, client.handle()))
+}
+
+fn agent_cancel(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let agent_id = {
+        let registry = &cx.editor.acp;
+        let name_hint: Option<&str> = args.first().map(|s| s.as_ref());
+        if let Some(name) = name_hint {
+            registry
+                .iter()
+                .find(|(_, c)| c.name == name)
+                .map(|(id, _)| id)
+                .ok_or_else(|| anyhow::anyhow!("no agent named '{name}'"))?
+        } else {
+            registry
+                .iter()
+                .next()
+                .map(|(id, _)| id)
+                .ok_or_else(|| anyhow::anyhow!("no ACP agents are running"))?
+        }
+    };
+
+    let (session_id, handle) = resolve_agent_handle(cx, agent_id)?;
+
+    handle
+        .session_cancel(session_id)
+        .map_err(|e| anyhow::anyhow!("cancel failed: {e}"))?;
+
+    if let Some(client) = cx.editor.acp.get_mut(agent_id) {
+        client.is_prompting = false;
+    }
+    cx.editor.set_status("Agent cancelled");
+    Ok(())
+}
+
 fn agent_prompt(
     cx: &mut compositor::Context,
     args: Args,
@@ -2924,22 +2982,11 @@ fn agent_prompt(
         }
     };
 
-    let (session_id, handle) = {
-        let client = cx
-            .editor
-            .acp
-            .get(agent_id)
-            .ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-        let session_id = client
-            .session_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("agent is still initializing — please wait"))?;
-        (session_id, client.handle())
-    };
+    let (session_id, handle) = resolve_agent_handle(cx, agent_id)?;
 
     {
         let client = cx.editor.acp.get_mut(agent_id).unwrap();
-        client.response_buf.clear();
+        client.display.clear();
         client.is_prompting = true;
     }
 
@@ -4082,6 +4129,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (1, None),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "agent-cancel",
+        aliases: &["ac"],
+        doc: "Cancel the in-flight ACP prompt: agent-cancel [agent-name]",
+        fun: agent_cancel,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
             ..Signature::DEFAULT
         },
     }

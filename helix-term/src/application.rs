@@ -705,23 +705,81 @@ impl Application {
         match call {
             Call::Notification(notif) => match notif.method.as_str() {
                 "session/update" => {
-                    use helix_acp::types::{ContentBlock, SessionUpdate, SessionUpdateParams};
+                    use helix_acp::{
+                        types::{ContentBlock, PlanStepStatus, SessionUpdate, SessionUpdateParams},
+                        DisplayLine,
+                    };
+
+                    /// Collect all text from a `ContentBlock` slice into one `String`.
+                    fn collect_text(content: &[ContentBlock]) -> String {
+                        content
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    }
+
                     if let Ok(params) = notif.params.parse::<SessionUpdateParams>() {
-                        if let SessionUpdate::AgentMessageChunk { content } = params.update {
-                            let text: String = content
-                                .iter()
-                                .filter_map(|b| match b {
-                                    ContentBlock::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
-                            if !text.is_empty() {
-                                if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                                    client.response_buf.push_str(&text);
+                        let Some(client) = self.editor.acp.get_mut(agent_id) else {
+                            return;
+                        };
+
+                        match params.update {
+                            SessionUpdate::AgentMessageChunk { content } => {
+                                let text = collect_text(&content);
+                                if !text.is_empty() {
+                                    match client.display.last_mut() {
+                                        Some(DisplayLine::Text(s)) => s.push_str(&text),
+                                        _ => client.display.push(DisplayLine::Text(text)),
+                                    }
                                 }
                             }
+                            SessionUpdate::AgentThoughtChunk { content } => {
+                                let text = collect_text(&content);
+                                if !text.is_empty() {
+                                    match client.display.last_mut() {
+                                        Some(DisplayLine::Thought(s)) => s.push_str(&text),
+                                        _ => client.display.push(DisplayLine::Thought(text)),
+                                    }
+                                }
+                            }
+                            SessionUpdate::ToolCall { id, name, .. } => {
+                                client.display.push(DisplayLine::ToolCall {
+                                    id: id.to_string(),
+                                    name,
+                                });
+                            }
+                            SessionUpdate::ToolCallUpdate { id, status, .. } => {
+                                let id_s = id.to_string();
+                                if let Some(pos) = client.display.iter().position(|l| {
+                                    matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
+                                }) {
+                                    client.display[pos] = DisplayLine::ToolDone {
+                                        id: id_s,
+                                        status: format!("{status:?}"),
+                                    };
+                                }
+                            }
+                            SessionUpdate::PlanUpdate { plan } => {
+                                // Replace all existing plan steps and re-push updated ones.
+                                client
+                                    .display
+                                    .retain(|l| !matches!(l, DisplayLine::PlanStep { .. }));
+                                for step in plan {
+                                    client.display.push(DisplayLine::PlanStep {
+                                        done: step.status == PlanStepStatus::Completed,
+                                        description: step.description,
+                                    });
+                                }
+                            }
+                            // AvailableCommandsUpdate / ConfigOptionUpdate / CurrentModeUpdate
+                            // have no visible effect in the panel.
+                            _ => {}
                         }
+                        helix_event::request_redraw();
                     }
                 }
                 "$/disconnected" => {
