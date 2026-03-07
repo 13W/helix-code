@@ -796,14 +796,70 @@ impl Application {
                     self.handle_acp_fs_write(agent_id, req).await;
                 }
                 "session/request_permission" => {
-                    // TODO Phase 6: show permission popup
-                    // For now, auto-reject
-                    let error = helix_acp::jsonrpc::Error::internal_error(
-                        "permissions not yet implemented",
-                    );
-                    if let Some(client) = self.editor.acp.get(agent_id) {
-                        client.reply_error(req.id, error);
+                    use helix_acp::types::{
+                        PermissionOption, RequestPermissionParams, RequestPermissionResult,
+                    };
+
+                    let Ok(params) = req.params.parse::<RequestPermissionParams>() else {
+                        let err = helix_acp::jsonrpc::Error::internal_error(
+                            "invalid permission params",
+                        );
+                        if let Some(client) = self.editor.acp.get(agent_id) {
+                            client.reply_error(req.id, err);
+                        }
+                        return;
+                    };
+
+                    if params.options.is_empty() {
+                        let err = helix_acp::jsonrpc::Error::internal_error(
+                            "no options provided",
+                        );
+                        if let Some(client) = self.editor.acp.get(agent_id) {
+                            client.reply_error(req.id, err);
+                        }
+                        return;
                     }
+
+                    let Some(server_tx) =
+                        self.editor.acp.get(agent_id).map(|c| c.sender())
+                    else {
+                        return;
+                    };
+                    let req_id = req.id.clone();
+
+                    let select = ui::Select::new(
+                        params.description,
+                        params.options,
+                        (),
+                        move |_editor, option: &PermissionOption, event| {
+                            use crate::ui::PromptEvent;
+                            use helix_acp::{jsonrpc, transport::Payload};
+                            let output = match event {
+                                PromptEvent::Update => return,
+                                PromptEvent::Validate => {
+                                    let result = RequestPermissionResult {
+                                        outcome: option.kind.clone(),
+                                    };
+                                    let value =
+                                        serde_json::to_value(&result).unwrap_or_default();
+                                    jsonrpc::Output::Success(jsonrpc::Success {
+                                        jsonrpc: Some(jsonrpc::Version::V2),
+                                        result: value,
+                                        id: req_id.clone(),
+                                    })
+                                }
+                                PromptEvent::Abort => jsonrpc::Output::Failure(jsonrpc::Failure {
+                                    jsonrpc: Some(jsonrpc::Version::V2),
+                                    error: jsonrpc::Error::internal_error("user rejected"),
+                                    id: req_id.clone(),
+                                }),
+                            };
+                            let _ = server_tx.send(Payload::Response(output));
+                        },
+                    );
+
+                    self.compositor.replace_or_push("acp-permission", select);
+                    // Do NOT send a reply here — the Select callback sends it.
                 }
                 "terminal/create"
                 | "terminal/output"
@@ -1609,5 +1665,12 @@ impl ui::menu::Item for lsp::MessageActionItem {
     type Data = ();
     fn format(&self, _data: &Self::Data) -> tui::widgets::Row<'_> {
         self.title.as_str().into()
+    }
+}
+
+impl ui::menu::Item for helix_acp::types::PermissionOption {
+    type Data = ();
+    fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
+        self.label.as_str().into()
     }
 }
