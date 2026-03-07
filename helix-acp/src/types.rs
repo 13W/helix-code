@@ -39,11 +39,11 @@ pub struct AgentCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_session: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<PromptCapabilities>,
+    pub prompt_capabilities: Option<PromptCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<McpCapabilities>,
+    pub mcp_capabilities: Option<McpCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<SessionCapabilities>,
+    pub session_capabilities: Option<SessionCapabilities>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -66,9 +66,33 @@ pub struct McpCapabilities {
     pub sse: bool,
 }
 
-/// Reserved for future expansion.
+/// One authentication method the agent supports.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct SessionCapabilities {}
+pub struct SessionForkCapabilities {}
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SessionListCapabilities {}
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SessionResumeCapabilities {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<SessionForkCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<SessionListCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<SessionResumeCapabilities>,
+}
 
 // ---------------------------------------------------------------------------
 // Implementation info
@@ -111,9 +135,13 @@ pub struct InitializeParams {
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub protocol_version: ProtocolVersion,
+    #[serde(rename = "agentCapabilities")]
     pub capabilities: AgentCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_info: Option<AgentInfo>,
+    /// Auth methods the agent accepts (may be empty if no auth required).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_methods: Vec<AuthMethod>,
 }
 
 // ---------------------------------------------------------------------------
@@ -135,11 +163,12 @@ pub struct AuthenticateResult {}
 // session/new
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub cwd: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -268,21 +297,20 @@ pub struct SessionUpdateParams {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "sessionUpdate", rename_all = "snake_case")]
 pub enum SessionUpdate {
     UserMessageChunk {
-        content: Vec<ContentBlock>,
+        content: ContentBlock,
     },
     AgentMessageChunk {
-        content: Vec<ContentBlock>,
+        content: ContentBlock,
     },
     AgentThoughtChunk {
-        content: Vec<ContentBlock>,
+        content: ContentBlock,
     },
     ToolCall {
         id: ToolCallId,
-        /// Tool name / type (e.g. "bash", "file_read"). Named `name` rather
-        /// than `kind` to avoid conflicting with the internal serde tag "kind".
+        /// Tool name / type (e.g. "bash", "file_read").
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
@@ -297,6 +325,7 @@ pub enum SessionUpdate {
         plan: Vec<PlanStep>,
     },
     AvailableCommandsUpdate {
+        #[serde(rename = "availableCommands")]
         commands: Vec<SlashCommand>,
     },
     ConfigOptionUpdate {
@@ -305,6 +334,8 @@ pub enum SessionUpdate {
     CurrentModeUpdate {
         mode: String,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
