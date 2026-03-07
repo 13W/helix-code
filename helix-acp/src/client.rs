@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::{
     io::{BufReader, BufWriter},
     process::{Child, Command},
@@ -50,11 +51,14 @@ pub struct Client {
     pub name: String,
     _process: Child,
     server_tx: UnboundedSender<Payload>,
-    request_counter: AtomicU64,
+    request_counter: Arc<AtomicU64>,
     /// Negotiated agent capabilities, set after `initialize()` completes.
     pub capabilities: Option<AgentCapabilities>,
     /// The active session ID, set after `session_new()` or `session_load()`.
     pub session_id: Option<SessionId>,
+    /// Accumulates text chunks from `session/update` AgentMessageChunk notifications
+    /// during an ongoing prompt turn. Cleared at the start of each new prompt.
+    pub response_buf: String,
 }
 
 impl Client {
@@ -107,9 +111,10 @@ impl Client {
             name,
             _process: process,
             server_tx: tx,
-            request_counter: AtomicU64::new(0),
+            request_counter: Arc::new(AtomicU64::new(0)),
             capabilities: None,
             session_id: None,
+            response_buf: String::new(),
         };
 
         Ok((client, rx))
@@ -333,5 +338,114 @@ impl Client {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no active session — call session_new() first"))?;
         self.session_prompt(session_id, vec![ContentBlock::text(text)]).await
+    }
+
+    /// Create a lightweight cloneable handle for use in background tasks (Jobs).
+    /// The handle shares the transport sender and request counter with this client.
+    pub fn handle(&self) -> ClientHandle {
+        ClientHandle {
+            id: self.id,
+            name: self.name.clone(),
+            server_tx: self.server_tx.clone(),
+            request_counter: Arc::clone(&self.request_counter),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ClientHandle — a Send + Clone handle for use in async Jobs
+// ---------------------------------------------------------------------------
+
+/// A lightweight cloneable handle for use in background tasks (Jobs).
+/// Shares the transport sender and request counter with the owning `Client`.
+#[derive(Clone)]
+pub struct ClientHandle {
+    pub id: AgentId,
+    name: String,
+    server_tx: UnboundedSender<Payload>,
+    request_counter: Arc<AtomicU64>,
+}
+
+impl ClientHandle {
+    fn next_request_id(&self) -> u64 {
+        self.request_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Send a request and await the response, deserializing it into `R`.
+    pub async fn call<R: DeserializeOwned>(&self, method: &str, params: impl Serialize) -> Result<R> {
+        let id = self.next_request_id();
+
+        let params_value = serde_json::to_value(&params)?;
+        let params = match params_value {
+            Value::Object(map) => jsonrpc::Params::Map(map),
+            Value::Array(arr) => jsonrpc::Params::Array(arr),
+            Value::Null => jsonrpc::Params::None,
+            other => jsonrpc::Params::Array(vec![other]),
+        };
+
+        let method_call = jsonrpc::MethodCall {
+            jsonrpc: Some(jsonrpc::Version::V2),
+            method: method.to_owned(),
+            params,
+            id: jsonrpc::Id::Num(id),
+        };
+
+        let (tx, mut rx) = channel(1);
+        self.server_tx
+            .send(Payload::Request {
+                chan: tx,
+                value: method_call,
+            })
+            .map_err(|_| Error::StreamClosed)?;
+
+        let value = rx.recv().await.ok_or(Error::StreamClosed)??;
+        serde_json::from_value(value).map_err(Into::into)
+    }
+
+    /// Run the initialize handshake. Returns the result to store on the Client.
+    pub async fn initialize(&self) -> Result<InitializeResult> {
+        let params = InitializeParams {
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: ClientCapabilities {
+                filesystem: Some(FileSystemCapabilities {
+                    read_text_file: true,
+                    write_text_file: true,
+                }),
+                terminal: Some(TerminalCapabilities::default()),
+            },
+            client_info: Some(ClientInfo {
+                name: "helix".to_owned(),
+                title: Some("Helix Editor".to_owned()),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            }),
+        };
+        let result: InitializeResult = self.call("initialize", params).await?;
+        log::info!(
+            "ACP agent '{}' initialized (protocol_version={})",
+            self.name,
+            result.protocol_version
+        );
+        Ok(result)
+    }
+
+    /// Create a new conversation session. Returns the result to store on the Client.
+    pub async fn session_new(&self) -> Result<NewSessionResult> {
+        let result: NewSessionResult = self
+            .call("session/new", NewSessionParams::default())
+            .await?;
+        log::info!("ACP agent '{}' session created: {}", self.name, result.session_id);
+        Ok(result)
+    }
+
+    /// Send a user prompt and wait for the agent's stop reason.
+    pub async fn session_prompt(
+        &self,
+        session_id: SessionId,
+        prompt: Vec<ContentBlock>,
+    ) -> Result<StopReason> {
+        let result: PromptResult = self
+            .call("session/prompt", PromptParams { session_id, prompt })
+            .await?;
+        Ok(result.stop_reason)
     }
 }

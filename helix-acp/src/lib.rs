@@ -25,7 +25,7 @@ pub mod registry;
 pub mod transport;
 pub mod types;
 
-pub use client::Client;
+pub use client::{Client, ClientHandle};
 pub use registry::Registry;
 pub use types::*;
 
