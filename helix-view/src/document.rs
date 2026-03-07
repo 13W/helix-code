@@ -1024,6 +1024,8 @@ impl Document {
 
         // We encode the file according to the `Document`'s encoding.
         let future = async move {
+            // Shadow as mutable so willSaveWaitUntil edits can be applied before encoding
+            let mut text = text;
             use tokio::fs;
             if let Some(parent) = path.parent() {
                 // TODO: display a prompt asking the user if the directories should be created
@@ -1032,6 +1034,49 @@ impl Document {
                         std::fs::DirBuilder::new().recursive(true).create(parent)?;
                     } else {
                         bail!("can't save file, parent directory does not exist (use :w! to create it)");
+                    }
+                }
+            }
+
+            // Send willSave notifications and willSaveWaitUntil requests before writing
+            if let Some(ref id) = identifier {
+                use helix_core::syntax::config::LanguageServerFeature;
+                // willSave notifications (fire-and-forget)
+                for ls in &language_servers {
+                    if ls.is_initialized()
+                        && ls.supports_feature(LanguageServerFeature::WillSave)
+                    {
+                        ls.text_document_will_save(
+                            id.clone(),
+                            helix_lsp::lsp::TextDocumentSaveReason::MANUAL,
+                        );
+                    }
+                }
+                // willSaveWaitUntil requests (await and apply returned edits)
+                for ls in &language_servers {
+                    if ls.is_initialized()
+                        && ls.supports_feature(LanguageServerFeature::WillSaveWaitUntil)
+                    {
+                        let offset_encoding = ls.offset_encoding();
+                        let fut = ls.text_document_will_save_wait_until(
+                            id.clone(),
+                            helix_lsp::lsp::TextDocumentSaveReason::MANUAL,
+                        );
+                        match fut.await {
+                            Ok(Some(edits)) if !edits.is_empty() => {
+                                let transaction =
+                                    helix_lsp::util::generate_transaction_from_edits(
+                                        &text,
+                                        edits,
+                                        offset_encoding,
+                                    );
+                                transaction.apply(&mut text);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::error!("willSaveWaitUntil request failed: {e}");
+                            }
+                        }
                     }
                 }
             }

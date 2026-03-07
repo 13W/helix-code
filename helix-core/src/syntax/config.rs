@@ -321,6 +321,11 @@ pub enum LanguageServerFeature {
     InlayHints,
     DocumentColors,
     CallHierarchy,
+    SelectionRange,
+    WillSave,
+    WillSaveWaitUntil,
+    OnTypeFormatting,
+    WorkspaceDiagnostics,
 }
 
 impl Display for LanguageServerFeature {
@@ -348,6 +353,11 @@ impl Display for LanguageServerFeature {
             InlayHints => "inlay-hints",
             DocumentColors => "document-colors",
             CallHierarchy => "call-hierarchy",
+            SelectionRange => "selection-range",
+            WillSave => "will-save",
+            WillSaveWaitUntil => "will-save-wait-until",
+            OnTypeFormatting => "on-type-formatting",
+            WorkspaceDiagnostics => "workspace-diagnostics",
         };
         write!(f, "{feature}",)
     }

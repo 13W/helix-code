@@ -1126,6 +1126,27 @@ impl Application {
 
                         Ok(serde_json::Value::Null)
                     }
+                    Ok(MethodCall::InlayHintRefresh) => {
+                        let language_server_id = language_server!().id();
+                        for doc in self.editor.documents.values_mut() {
+                            if doc.supports_language_server(language_server_id) {
+                                doc.inlay_hints_oudated = true;
+                            }
+                        }
+                        crate::commands::lsp::compute_inlay_hints_for_all_views(
+                            &mut self.editor,
+                            &mut self.jobs,
+                        );
+                        Ok(serde_json::Value::Null)
+                    }
+                    Ok(MethodCall::SemanticTokensRefresh) => {
+                        // Semantic tokens are not yet supported, acknowledge the refresh
+                        Ok(serde_json::Value::Null)
+                    }
+                    Ok(MethodCall::CodeLensRefresh) => {
+                        // Code lens is not yet supported, acknowledge the refresh
+                        Ok(serde_json::Value::Null)
+                    }
                     Ok(MethodCall::ShowMessageRequest(params)) => {
                         if let Some(actions) = params.actions.filter(|a| !a.is_empty()) {
                             let id = id.clone();

@@ -493,34 +493,58 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
                     .unwrap();
                 let offset_encoding = language_server.offset_encoding();
                 async move {
-                    let symbols = request
+                    let resp = request
                         .await?
-                        .and_then(|resp| match resp {
-                            lsp::WorkspaceSymbolResponse::Flat(symbols) => Some(symbols),
-                            lsp::WorkspaceSymbolResponse::Nested(_) => None,
-                        })
-                        .unwrap_or_default();
+                        .unwrap_or(lsp::WorkspaceSymbolResponse::Flat(vec![]));
 
-                    let response: Vec<_> = symbols
-                        .into_iter()
-                        .filter_map(|symbol| {
-                            let uri = match Uri::try_from(&symbol.location.uri) {
-                                Ok(uri) => uri,
-                                Err(err) => {
-                                    log::warn!("discarding symbol with invalid URI: {err}");
-                                    return None;
-                                }
-                            };
-                            Some(SymbolInformationItem {
-                                location: Location {
-                                    uri,
-                                    range: symbol.location.range,
-                                    offset_encoding,
-                                },
-                                symbol,
+                    let response: Vec<_> = match resp {
+                        lsp::WorkspaceSymbolResponse::Flat(symbols) => symbols
+                            .into_iter()
+                            .filter_map(|symbol| {
+                                let uri = match Uri::try_from(&symbol.location.uri) {
+                                    Ok(uri) => uri,
+                                    Err(err) => {
+                                        log::warn!("discarding symbol with invalid URI: {err}");
+                                        return None;
+                                    }
+                                };
+                                Some(SymbolInformationItem {
+                                    location: Location {
+                                        uri,
+                                        range: symbol.location.range,
+                                        offset_encoding,
+                                    },
+                                    symbol,
+                                })
                             })
-                        })
-                        .collect();
+                            .collect(),
+                        lsp::WorkspaceSymbolResponse::Nested(symbols) => symbols
+                            .into_iter()
+                            .filter_map(|symbol| {
+                                // Only handle symbols that already have a full Location with range.
+                                // Symbols with only a WorkspaceLocation (URI, no range) require
+                                // workspaceSymbol/resolve which is handled at the call site.
+                                let lsp_location = match symbol.location {
+                                    lsp::OneOf::Left(loc) => loc,
+                                    lsp::OneOf::Right(_) => return None,
+                                };
+                                let location =
+                                    lsp_location_to_location(lsp_location.clone(), offset_encoding)?;
+                                #[allow(deprecated)]
+                                Some(SymbolInformationItem {
+                                    location,
+                                    symbol: lsp::SymbolInformation {
+                                        name: symbol.name,
+                                        kind: symbol.kind,
+                                        tags: symbol.tags,
+                                        deprecated: None,
+                                        location: lsp_location,
+                                        container_name: symbol.container_name,
+                                    },
+                                })
+                            })
+                            .collect(),
+                    };
 
                     anyhow::Ok(response)
                 }
@@ -612,6 +636,299 @@ pub fn workspace_diagnostics_picker(cx: &mut Context) {
     let diagnostics = cx.editor.diagnostics.clone();
     let picker = diag_picker(cx, diagnostics, DiagnosticsFormat::ShowSourcePath);
     cx.push_layer(Box::new(overlaid(picker)));
+}
+
+pub fn lsp_expand_selection(cx: &mut Context) {
+    let (view, doc) = current_ref!(cx.editor);
+    let view_id = view.id;
+
+    let Some(language_server) = doc
+        .language_servers_with_feature(LanguageServerFeature::SelectionRange)
+        .next()
+    else {
+        cx.editor
+            .set_error("No configured language server supports selection range");
+        return;
+    };
+
+    let offset_encoding = language_server.offset_encoding();
+    let doc_id = doc.id();
+    let text = doc.text().clone();
+    let selection = doc.selection(view_id).clone();
+
+    let positions: Vec<lsp::Position> = selection
+        .iter()
+        .map(|range| {
+            let cursor = range.cursor(text.slice(..));
+            helix_lsp::util::pos_to_lsp_pos(&text, cursor, offset_encoding)
+        })
+        .collect();
+
+    let future = language_server.selection_range(doc.identifier(), positions);
+
+    cx.jobs.callback(async move {
+        let lsp_ranges = match future.await {
+            Ok(Some(r)) if !r.is_empty() => r,
+            Ok(_) => {
+                return Ok(Callback::Editor(Box::new(|_editor| {})));
+            }
+            Err(err) => {
+                log::error!("selection_range request failed: {err}");
+                return Ok(Callback::Editor(Box::new(|_editor| {})));
+            }
+        };
+
+        // For each cursor range, walk the SelectionRange chain to find the first
+        // range that strictly contains the current selection.
+        let new_ranges: helix_core::SmallVec<[helix_core::Range; 1]> = selection
+            .iter()
+            .zip(lsp_ranges.iter())
+            .map(|(current, lsp_range)| {
+                let sel_from = current.from();
+                let sel_to = current.to();
+
+                let mut node: Option<&lsp::SelectionRange> = Some(lsp_range);
+                while let Some(sr) = node {
+                    if let Some(r) = helix_lsp::util::lsp_range_to_range(
+                        &text,
+                        sr.range,
+                        offset_encoding,
+                    ) {
+                        let r_from = r.from();
+                        let r_to = r.to();
+                        // Accept if strictly larger than current selection
+                        if r_from <= sel_from
+                            && r_to >= sel_to
+                            && (r_from < sel_from || r_to > sel_to)
+                        {
+                            // Preserve selection direction
+                            return if current.anchor <= current.head {
+                                helix_core::Range::new(r_from, r_to)
+                            } else {
+                                helix_core::Range::new(r_to, r_from)
+                            };
+                        }
+                    }
+                    node = sr.parent.as_deref();
+                }
+                *current
+            })
+            .collect();
+
+        let new_selection =
+            helix_core::Selection::new(new_ranges, selection.primary_index());
+
+        Ok(Callback::Editor(Box::new(move |editor| {
+            let Some(doc) = editor.document_mut(doc_id) else {
+                return;
+            };
+            doc.set_selection(view_id, new_selection);
+        })))
+    });
+}
+
+pub fn pull_workspace_diagnostics(cx: &mut Context) {
+    use futures_util::stream::FuturesUnordered;
+
+    // If no server supports workspace/diagnostic at all, fall back to
+    // triggering textDocument/diagnostic for every open document.
+    let has_workspace_diag = cx
+        .editor
+        .language_servers
+        .iter_clients()
+        .any(|ls| ls.supports_feature(LanguageServerFeature::WorkspaceDiagnostics));
+
+    if !has_workspace_diag {
+        let has_pull_diag = cx
+            .editor
+            .language_servers
+            .iter_clients()
+            .any(|ls| ls.supports_feature(LanguageServerFeature::PullDiagnostics));
+        if !has_pull_diag {
+            cx.editor
+                .set_error("No configured language server supports pull diagnostics");
+            return;
+        }
+        // Trigger per-document pull for all open documents, then open the picker.
+        let doc_ids: Vec<_> = cx.editor.documents.keys().copied().collect();
+        for doc_id in doc_ids {
+            crate::handlers::diagnostics::request_document_diagnostics(cx.editor, doc_id);
+        }
+        cx.editor.set_status("Refreshing diagnostics…");
+        workspace_diagnostics_picker(cx);
+        return;
+    }
+
+    let futures: FuturesUnordered<_> = cx
+        .editor
+        .language_servers
+        .iter_clients()
+        .filter(|ls| ls.supports_feature(LanguageServerFeature::WorkspaceDiagnostics))
+        .map(|ls| {
+            let server_id = ls.id();
+            let offset_encoding = ls.offset_encoding();
+            let future = ls.workspace_diagnostic(vec![]);
+            async move {
+                anyhow::Ok((server_id, offset_encoding, future.await?))
+            }
+        })
+        .collect();
+
+    cx.jobs.callback(async move {
+        // Collect all full diagnostic reports, keyed by (uri, server_id, offset_encoding)
+        type ReportItem = (
+            Uri,
+            helix_lsp::LanguageServerId,
+            OffsetEncoding,
+            Vec<lsp::Diagnostic>,
+        );
+        let mut reports: Vec<ReportItem> = Vec::new();
+
+        let mut stream = futures;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok((server_id, offset_encoding, result)) => {
+                    let items = match result {
+                        lsp::WorkspaceDiagnosticReportResult::Report(r) => r.items,
+                        lsp::WorkspaceDiagnosticReportResult::Partial(r) => r.items,
+                    };
+                    for item in items {
+                        if let lsp::WorkspaceDocumentDiagnosticReport::Full(full) = item {
+                            if let Ok(uri) = Uri::try_from(full.uri) {
+                                reports.push((
+                                    uri,
+                                    server_id,
+                                    offset_encoding,
+                                    full.full_document_diagnostic_report.items,
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(err) => log::error!("workspace/diagnostic error: {err}"),
+            }
+        }
+
+        let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+            // Insert raw LSP diagnostics into editor.diagnostics
+            for (uri, server_id, _enc, diags) in &reports {
+                let entries: Vec<_> = diags
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.clone(),
+                            helix_core::diagnostic::DiagnosticProvider::Lsp {
+                                server_id: *server_id,
+                                identifier: None,
+                            },
+                        )
+                    })
+                    .collect();
+                editor
+                    .diagnostics
+                    .entry(uri.clone())
+                    .or_default()
+                    .extend(entries);
+            }
+
+            // Build and show the workspace diagnostics picker using editor data
+            let diagnostics_flat: Vec<PickerDiagnostic> = reports
+                .iter()
+                .flat_map(|(uri, _server_id, offset_encoding, diags)| {
+                    diags.iter().map(move |d| PickerDiagnostic {
+                        location: Location {
+                            uri: uri.clone(),
+                            range: d.range,
+                            offset_encoding: *offset_encoding,
+                        },
+                        diag: d.clone(),
+                    })
+                })
+                .collect();
+
+            if diagnostics_flat.is_empty() {
+                editor.set_status("No workspace diagnostics found");
+                return;
+            }
+
+            let mut diagnostics_flat = diagnostics_flat;
+            diagnostics_flat.sort_by(|a, b| {
+                a.diag
+                    .severity
+                    .unwrap_or(lsp::DiagnosticSeverity::HINT)
+                    .cmp(&b.diag.severity.unwrap_or(lsp::DiagnosticSeverity::HINT))
+            });
+
+            let styles = DiagnosticStyles {
+                hint: editor.theme.get("hint"),
+                info: editor.theme.get("info"),
+                warning: editor.theme.get("warning"),
+                error: editor.theme.get("error"),
+            };
+
+            let icons = ICONS.load();
+            let columns = vec![
+                ui::PickerColumn::new(
+                    "severity",
+                    |item: &PickerDiagnostic, styles: &DiagnosticStyles| {
+                        let icons = ICONS.load();
+                        match item.diag.severity {
+                            Some(lsp::DiagnosticSeverity::HINT) => Span::styled(
+                                format!("{} HINT", icons.diagnostic().hint()),
+                                styles.hint,
+                            ),
+                            Some(lsp::DiagnosticSeverity::INFORMATION) => Span::styled(
+                                format!("{} INFO", icons.diagnostic().info()),
+                                styles.info,
+                            ),
+                            Some(lsp::DiagnosticSeverity::WARNING) => Span::styled(
+                                format!("{} WARN", icons.diagnostic().warning()),
+                                styles.warning,
+                            ),
+                            Some(lsp::DiagnosticSeverity::ERROR) => Span::styled(
+                                format!("{} ERROR", icons.diagnostic().error()),
+                                styles.error,
+                            ),
+                            _ => Span::raw(""),
+                        }
+                        .into()
+                    },
+                ),
+                ui::PickerColumn::new("path", |item: &PickerDiagnostic, _| {
+                    if let Some(p) = item.location.uri.as_path() {
+                        path::get_truncated_path(p)
+                            .to_string_lossy()
+                            .to_string()
+                            .into()
+                    } else {
+                        Default::default()
+                    }
+                }),
+                ui::PickerColumn::new("message", |item: &PickerDiagnostic, _| {
+                    item.diag.message.as_str().into()
+                }),
+            ];
+            drop(icons);
+
+            let picker = Picker::new(
+                columns,
+                2, // primary = message
+                diagnostics_flat,
+                styles,
+                move |cx, diag, action| {
+                    jump_to_location(cx.editor, &diag.location, action);
+                    let (view, doc) = current!(cx.editor);
+                    view.diagnostics_handler
+                        .immediately_show_diagnostic(doc, view.id);
+                },
+            )
+            .with_preview(move |_editor, diag| location_to_file_location(&diag.location))
+            .truncate_start(false);
+
+            compositor.push(Box::new(overlaid(picker)));
+        };
+        Ok(Callback::EditorCompositor(Box::new(call)))
+    });
 }
 
 struct CodeActionOrCommandItem {
