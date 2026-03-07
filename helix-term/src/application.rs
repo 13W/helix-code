@@ -140,6 +140,8 @@ impl Application {
         );
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
+        Self::start_configured_agents(&mut editor);
+
         let keys = Box::new(Map::new(Arc::clone(&config), |config: &Config| {
             &config.keys
         }));
@@ -674,6 +676,10 @@ impl Application {
                     self.render().await;
                 }
             }
+            EditorEvent::AcpMessage((agent_id, call)) => {
+                self.handle_acp_message(agent_id, call).await;
+                helix_event::request_redraw();
+            }
             EditorEvent::Redraw => {
                 self.render().await;
             }
@@ -689,6 +695,141 @@ impl Application {
         }
 
         false
+    }
+
+    async fn handle_acp_message(
+        &mut self,
+        agent_id: helix_acp::AgentId,
+        call: helix_acp::jsonrpc::Call,
+    ) {
+        use helix_acp::jsonrpc::Call;
+        match call {
+            Call::Notification(notif) => match notif.method.as_str() {
+                "session/update" => {
+                    // TODO Phase 4: stream chunks to UI
+                    log::debug!("ACP {agent_id}: session/update");
+                }
+                "$/disconnected" => {
+                    log::info!("ACP agent {agent_id} disconnected");
+                    self.editor.acp.stop_agent(agent_id);
+                }
+                _ => log::debug!("ACP {agent_id}: unhandled notification '{}'", notif.method),
+            },
+            Call::MethodCall(req) => match req.method.as_str() {
+                "fs/read_text_file" => {
+                    self.handle_acp_fs_read(agent_id, req).await;
+                }
+                "fs/write_text_file" => {
+                    self.handle_acp_fs_write(agent_id, req).await;
+                }
+                "session/request_permission" => {
+                    // TODO Phase 6: show permission popup
+                    // For now, auto-reject
+                    let error = helix_acp::jsonrpc::Error::internal_error(
+                        "permissions not yet implemented",
+                    );
+                    if let Some(client) = self.editor.acp.get(agent_id) {
+                        client.reply_error(req.id, error);
+                    }
+                }
+                "terminal/create"
+                | "terminal/output"
+                | "terminal/kill"
+                | "terminal/release"
+                | "terminal/wait_for_exit" => {
+                    let error = helix_acp::jsonrpc::Error::internal_error(
+                        "terminal not yet implemented",
+                    );
+                    if let Some(client) = self.editor.acp.get(agent_id) {
+                        client.reply_error(req.id, error);
+                    }
+                }
+                _ => log::warn!("ACP {agent_id}: unhandled request '{}'", req.method),
+            },
+            Call::Invalid { id } => {
+                log::warn!("ACP {agent_id}: invalid message id={id}");
+            }
+        }
+    }
+
+    async fn handle_acp_fs_read(
+        &mut self,
+        agent_id: helix_acp::AgentId,
+        req: helix_acp::jsonrpc::MethodCall,
+    ) {
+        use helix_acp::types::{ReadTextFileParams, ReadTextFileResult};
+
+        let result = req
+            .params
+            .parse::<ReadTextFileParams>()
+            .map_err(helix_acp::Error::from)
+            .and_then(|params| {
+                std::fs::read_to_string(&params.path)
+                    .map(|content| ReadTextFileResult { content })
+                    .map_err(helix_acp::Error::Io)
+            });
+
+        if let Some(client) = self.editor.acp.get(agent_id) {
+            match result {
+                Ok(res) => {
+                    let val = serde_json::to_value(res).unwrap_or_default();
+                    client.reply(req.id, Ok(val));
+                }
+                Err(err) => {
+                    client.reply(req.id, Err(err));
+                }
+            }
+        }
+    }
+
+    async fn handle_acp_fs_write(
+        &mut self,
+        agent_id: helix_acp::AgentId,
+        req: helix_acp::jsonrpc::MethodCall,
+    ) {
+        use helix_acp::types::{WriteTextFileParams, WriteTextFileResult};
+
+        let result = req
+            .params
+            .parse::<WriteTextFileParams>()
+            .map_err(helix_acp::Error::from)
+            .and_then(|params| {
+                std::fs::write(&params.path, &params.content)
+                    .map(|_| WriteTextFileResult {})
+                    .map_err(helix_acp::Error::Io)
+            });
+
+        if let Some(client) = self.editor.acp.get(agent_id) {
+            match result {
+                Ok(res) => {
+                    let val = serde_json::to_value(res).unwrap_or_default();
+                    client.reply(req.id, Ok(val));
+                }
+                Err(err) => {
+                    client.reply(req.id, Err(err));
+                }
+            }
+        }
+    }
+
+    fn start_configured_agents(editor: &mut Editor) {
+        let loader = editor.syn_loader.load();
+        for agent_cfg in loader.agent_configurations() {
+            if !agent_cfg.enabled {
+                continue;
+            }
+            let config = helix_acp::client::AgentConfig {
+                command: agent_cfg.command.clone(),
+                args: agent_cfg.args.clone(),
+                env: agent_cfg.environment.clone(),
+            };
+            match editor.acp.start_agent(&config) {
+                Ok(id) => {
+                    log::info!("ACP: started agent '{}' ({id})", agent_cfg.name);
+                }
+                Err(e) => log::error!("ACP: failed to start agent '{}': {e}", agent_cfg.name),
+            }
+        }
     }
 
     pub async fn handle_terminal_events(&mut self, event: std::io::Result<TerminalEvent>) {

@@ -1371,6 +1371,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "helix-acp"
+version = "25.7.1"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "sonic-rs",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "helix-core"
 version = "25.7.1"
 dependencies = [
@@ -1539,6 +1554,7 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "helix-acp",
  "helix-core",
  "helix-dap",
  "helix-event",
@@ -1617,6 +1633,7 @@ dependencies = [
  "clipboard-win",
  "crossterm",
  "futures-util",
+ "helix-acp",
  "helix-core",
  "helix-dap",
  "helix-event",
