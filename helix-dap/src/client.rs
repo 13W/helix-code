@@ -541,6 +541,89 @@ impl Client {
         self.call::<requests::SetExceptionBreakpoints>(args)
     }
 
+    pub async fn set_function_breakpoints(
+        &self,
+        breakpoints: Vec<FunctionBreakpoint>,
+    ) -> Result<Option<Vec<Breakpoint>>> {
+        let args = requests::SetFunctionBreakpointsArguments { breakpoints };
+        let response = self
+            .request::<requests::SetFunctionBreakpoints>(args)
+            .await?;
+        Ok(response.breakpoints)
+    }
+
+    pub async fn set_variable(
+        &self,
+        variables_reference: usize,
+        name: String,
+        value: String,
+    ) -> Result<requests::SetVariableResponse> {
+        let args = requests::SetVariableArguments {
+            variables_reference,
+            name,
+            value,
+            format: None,
+        };
+        self.request::<requests::SetVariable>(args).await
+    }
+
+    pub async fn exception_info(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<requests::ExceptionInfoResponse> {
+        let args = requests::ExceptionInfoArguments { thread_id };
+        self.request::<requests::ExceptionInfo>(args).await
+    }
+
+    pub async fn source(
+        &self,
+        source_reference: usize,
+        source: Option<Source>,
+    ) -> Result<requests::SourceResponse> {
+        let args = requests::SourceArguments {
+            source,
+            source_reference,
+        };
+        self.request::<requests::SourceRequest>(args).await
+    }
+
+    pub async fn set_expression(
+        &self,
+        expression: String,
+        value: String,
+        frame_id: Option<usize>,
+    ) -> Result<requests::SetExpressionResponse> {
+        let args = requests::SetExpressionArguments {
+            expression,
+            value,
+            frame_id,
+            format: None,
+        };
+        self.request::<requests::SetExpression>(args).await
+    }
+
+    pub async fn set_data_breakpoints(
+        &self,
+        breakpoints: Vec<DataBreakpoint>,
+    ) -> Result<Vec<Breakpoint>> {
+        let args = requests::SetDataBreakpointsArguments { breakpoints };
+        let response = self
+            .request::<requests::SetDataBreakpoints>(args)
+            .await?;
+        Ok(response.breakpoints)
+    }
+
+    pub async fn set_instruction_breakpoints(
+        &self,
+        breakpoints: Vec<InstructionBreakpoint>,
+    ) -> Result<Vec<Breakpoint>> {
+        let args = requests::SetInstructionBreakpointsArguments { breakpoints };
+        let response = self
+            .request::<requests::SetInstructionBreakpoints>(args)
+            .await?;
+        Ok(response.breakpoints)
+    }
+
     pub fn current_stack_frame(&self) -> Option<&StackFrame> {
         self.stack_frames
             .get(&self.thread_id?)?
