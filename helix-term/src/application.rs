@@ -791,13 +791,35 @@ impl Application {
                             }
                         }
                         // Flip display entry from in-progress to done.
-                        let status_str = format!("{:?}", update.fields.status);
+                        let status_str = match &update.fields.status {
+                            Some(ToolCallStatus::Completed) | None => "done".to_string(),
+                            Some(other) => format!("{other:?}").to_lowercase(),
+                        };
+                        // Extract text lines from content blocks for display.
+                        let output: Vec<String> = update
+                            .fields
+                            .content
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter_map(|c| {
+                                use helix_acp::sdk::ToolCallContent;
+                                if let ToolCallContent::Content(c) = c {
+                                    if let helix_acp::sdk::ContentBlock::Text(t) = &c.content {
+                                        return Some(t.text.clone());
+                                    }
+                                }
+                                None
+                            })
+                            .flat_map(|s| s.lines().map(|l| l.to_string()).collect::<Vec<_>>())
+                            .collect();
                         if let Some(pos) = client.display.iter().position(|l| {
                             matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
                         }) {
                             client.display[pos] = DisplayLine::ToolDone {
                                 id: id_s.clone(),
                                 status: status_str,
+                                output,
                             };
                         }
                         // On completion: collect paths for reload.
@@ -824,9 +846,11 @@ impl Application {
                     SessionUpdate::CurrentModeUpdate(cmu) => {
                         client.current_mode = Some(cmu.current_mode_id.to_string());
                     }
+                    SessionUpdate::AvailableCommandsUpdate(acu) => {
+                        client.available_commands = acu.available_commands;
+                    }
                     // UsageUpdate is behind an unstable feature flag — ignore.
-                    // AvailableCommandsUpdate / ConfigOptionUpdate / Unknown:
-                    // no visible effect in the panel.
+                    // ConfigOptionUpdate / Unknown: no visible effect in the panel.
                     _ => {}
                 }
                 helix_event::request_redraw();
