@@ -344,11 +344,13 @@ pub enum DisplayLine {
     /// Tool call started: shows tool name while in progress.
     ToolCall { id: String, name: String },
     /// Tool call finished — replaces the matching `ToolCall` entry in-place.
-    ToolDone { id: String, status: String },
+    ToolDone { id: String, status: String, output: Vec<String> },
     /// Plan step from a `PlanUpdate`.
     PlanStep { done: bool, description: String },
     /// Visual divider between conversation turns.
     Separator,
+    /// The text the user sent — echoed in the panel.
+    UserMessage(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +384,10 @@ pub struct Client {
     pub auto_accept_edits: bool,
     /// Latest token usage received via `UsageUpdate`: (used, size, cost_amount, currency).
     pub usage: Option<(u64, u64, f64, String)>,
+    /// Commands received via `AvailableCommandsUpdate`.
+    pub available_commands: Vec<sdk::AvailableCommand>,
+    /// Command text to drain into the textarea on the next panel event.
+    pub pending_command: Option<String>,
 }
 
 impl Client {
@@ -488,6 +494,8 @@ impl Client {
             auto_continue: Arc::new(AtomicBool::new(false)),
             auto_accept_edits: false,
             usage: None,
+            available_commands: Vec::new(),
+            pending_command: None,
         };
 
         Ok((client, event_rx))

@@ -1,5 +1,8 @@
 pub mod agent;
+pub mod button;
 mod completion;
+pub mod multi_menu;
+pub mod textarea;
 mod document;
 pub(crate) mod editor;
 mod info;
@@ -20,6 +23,9 @@ use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use agent::AgentPanel;
+pub use button::ButtonGroup;
+pub use multi_menu::{MultiMenu, MultiMenuItem};
+pub use textarea::TextArea;
 pub use completion::Completion;
 pub use editor::EditorView;
 use helix_stdx::rope;
