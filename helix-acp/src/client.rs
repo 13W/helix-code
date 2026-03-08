@@ -1,27 +1,313 @@
-//! ACP agent client.
+//! ACP agent client — backed by the official `agent-client-protocol` SDK.
 //!
-//! `Client` manages a single agent subprocess: spawning the process, performing
-//! the initialization handshake, and providing typed methods for all ACP requests.
+//! Each agent runs in a dedicated `std::thread` with a `tokio::task::LocalSet`,
+//! allowing the SDK's `!Send` connection types to work correctly.  The helix
+//! main loop communicates with the LocalSet via ordinary mpsc channels.
 
-use crate::{
-    jsonrpc,
-    transport::{self, Payload},
-    types::*,
-    AgentId, Error, Result,
-};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use crate::{types::*, AgentId, Error, Result};
+use agent_client_protocol as sdk;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use tokio::{
-    io::{BufReader, BufWriter},
     process::{Child, Command},
-    sync::mpsc::{channel, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        oneshot,
+    },
 };
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// Current ACP protocol version supported by this client.
-pub const PROTOCOL_VERSION: ProtocolVersion = 1;
+// ---------------------------------------------------------------------------
+// Public: AcpEvent
+// ---------------------------------------------------------------------------
+
+/// A reply channel for agent-initiated requests.  Wrapped in `Arc<Mutex<Option>>`
+/// so it can be moved into `Fn` UI callbacks that may be invoked multiple times.
+pub type ReplyChannel<T> = Arc<Mutex<Option<oneshot::Sender<T>>>>;
+
+/// An event emitted by an ACP agent, forwarded to the application's main loop.
+#[derive(Debug)]
+pub enum AcpEvent {
+    /// Agent sent a `session/update` notification.
+    SessionNotification(sdk::SessionNotification),
+    /// Agent requests user permission for a tool call.
+    RequestPermission {
+        params: sdk::RequestPermissionRequest,
+        reply: ReplyChannel<sdk::RequestPermissionResponse>,
+    },
+    /// Agent wants to read a text file from the client's filesystem.
+    ReadTextFile {
+        params: sdk::ReadTextFileRequest,
+        reply: ReplyChannel<sdk::ReadTextFileResponse>,
+    },
+    /// Agent wants to write a text file to the client's filesystem.
+    WriteTextFile {
+        params: sdk::WriteTextFileRequest,
+        reply: ReplyChannel<sdk::WriteTextFileResponse>,
+    },
+    /// Agent subprocess disconnected / exited.
+    Disconnected,
+}
+
+// ---------------------------------------------------------------------------
+// Internal: AgentRpcCall — messages from main thread → LocalSet actor
+// ---------------------------------------------------------------------------
+
+enum AgentRpcCall {
+    Initialize {
+        reply: oneshot::Sender<Result<InitializeResult>>,
+    },
+    Authenticate {
+        params: AuthenticateParams,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    NewSession {
+        cwd: String,
+        reply: oneshot::Sender<Result<NewSessionResult>>,
+    },
+    LoadSession {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Prompt {
+        session_id: SessionId,
+        prompt: Vec<ContentBlock>,
+        reply: oneshot::Sender<Result<StopReason>>,
+    },
+    Cancel {
+        session_id: SessionId,
+    },
+    SetMode {
+        session_id: SessionId,
+        mode: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SetConfigOption {
+        session_id: SessionId,
+        option_id: String,
+        value: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// HelixClientHandler — implements sdk::Client for agent → client calls
+// ---------------------------------------------------------------------------
+
+struct HelixClientHandler {
+    agent_id: AgentId,
+    event_tx: UnboundedSender<(AgentId, AcpEvent)>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl sdk::Client for HelixClientHandler {
+    async fn session_notification(&self, args: sdk::SessionNotification) -> sdk::Result<()> {
+        let _ = self
+            .event_tx
+            .send((self.agent_id, AcpEvent::SessionNotification(args)));
+        Ok(())
+    }
+
+    async fn request_permission(
+        &self,
+        args: sdk::RequestPermissionRequest,
+    ) -> sdk::Result<sdk::RequestPermissionResponse> {
+        let (tx, rx) = oneshot::channel();
+        let reply = Arc::new(Mutex::new(Some(tx)));
+        let _ = self.event_tx.send((
+            self.agent_id,
+            AcpEvent::RequestPermission { params: args, reply },
+        ));
+        rx.await.map_err(|_| sdk::Error::internal_error())
+    }
+
+    async fn read_text_file(
+        &self,
+        args: sdk::ReadTextFileRequest,
+    ) -> sdk::Result<sdk::ReadTextFileResponse> {
+        let (tx, rx) = oneshot::channel();
+        let reply = Arc::new(Mutex::new(Some(tx)));
+        let _ = self.event_tx.send((
+            self.agent_id,
+            AcpEvent::ReadTextFile { params: args, reply },
+        ));
+        rx.await.map_err(|_| sdk::Error::internal_error())
+    }
+
+    async fn write_text_file(
+        &self,
+        args: sdk::WriteTextFileRequest,
+    ) -> sdk::Result<sdk::WriteTextFileResponse> {
+        let (tx, rx) = oneshot::channel();
+        let reply = Arc::new(Mutex::new(Some(tx)));
+        let _ = self.event_tx.send((
+            self.agent_id,
+            AcpEvent::WriteTextFile { params: args, reply },
+        ));
+        rx.await.map_err(|_| sdk::Error::internal_error())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rpc_actor — runs in LocalSet; bridges AgentRpcCall → SDK calls
+// ---------------------------------------------------------------------------
+
+async fn rpc_actor(
+    conn: Rc<sdk::ClientSideConnection>,
+    mut rpc_rx: UnboundedReceiver<AgentRpcCall>,
+) {
+    use sdk::Agent as _;
+
+    while let Some(call) = rpc_rx.recv().await {
+        let conn = Rc::clone(&conn);
+        tokio::task::spawn_local(async move {
+            match call {
+                AgentRpcCall::Initialize { reply } => {
+                    let req = sdk::InitializeRequest::new(sdk::ProtocolVersion::LATEST)
+                        .client_capabilities(
+                            sdk::ClientCapabilities::new()
+                                .fs(sdk::FileSystemCapabilities::new()
+                                    .read_text_file(true)
+                                    .write_text_file(true))
+                                .terminal(false),
+                        )
+                        .client_info(
+                            sdk::Implementation::new("helix", env!("CARGO_PKG_VERSION"))
+                                .title("Helix Editor".to_owned()),
+                        );
+                    let result = conn.initialize(req).await
+                        .map(convert_init_response)
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::Authenticate { params, reply } => {
+                    let method_id = params
+                        .extra
+                        .get("methodId")
+                        .or_else(|| params.extra.get("method"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_owned();
+                    let req = sdk::AuthenticateRequest::new(method_id);
+                    let result = conn.authenticate(req).await
+                        .map(|_| ())
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::NewSession { cwd, reply } => {
+                    let req = sdk::NewSessionRequest::new(std::path::PathBuf::from(cwd));
+                    let result = conn.new_session(req).await
+                        .map(|resp| NewSessionResult {
+                            session_id: resp.session_id.to_string(),
+                        })
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::LoadSession { session_id, reply } => {
+                    let cwd = std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let req = sdk::LoadSessionRequest::new(session_id, cwd);
+                    let result = conn.load_session(req).await
+                        .map(|_| ())
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::Prompt { session_id, prompt, reply } => {
+                    let sdk_prompt = prompt.into_iter().map(to_sdk_content_block).collect();
+                    let req = sdk::PromptRequest::new(session_id, sdk_prompt);
+                    let result = conn.prompt(req).await
+                        .map(|resp| convert_stop_reason(resp.stop_reason))
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::Cancel { session_id } => {
+                    let notif = sdk::CancelNotification::new(session_id);
+                    let _ = conn.cancel(notif).await;
+                }
+
+                AgentRpcCall::SetMode { session_id, mode, reply } => {
+                    let req = sdk::SetSessionModeRequest::new(session_id, mode);
+                    let result = conn.set_session_mode(req).await
+                        .map(|_| ())
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+
+                AgentRpcCall::SetConfigOption { session_id, option_id, value, reply } => {
+                    let req = sdk::SetSessionConfigOptionRequest::new(session_id, option_id, value);
+                    let result = conn.set_session_config_option(req).await
+                        .map(|_| ())
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type conversion helpers
+// ---------------------------------------------------------------------------
+
+fn to_sdk_content_block(cb: ContentBlock) -> sdk::ContentBlock {
+    match cb {
+        ContentBlock::Text { text } => sdk::ContentBlock::Text(sdk::TextContent::new(text)),
+        // Fallback for non-text blocks — these are not used in current prompts
+        _ => sdk::ContentBlock::Text(sdk::TextContent::new("[unsupported content block]")),
+    }
+}
+
+fn convert_stop_reason(r: sdk::StopReason) -> StopReason {
+    match r {
+        sdk::StopReason::EndTurn => StopReason::EndTurn,
+        sdk::StopReason::MaxTokens => StopReason::MaxTokens,
+        sdk::StopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        sdk::StopReason::Refusal => StopReason::Refusal,
+        sdk::StopReason::Cancelled => StopReason::Cancelled,
+        _ => StopReason::EndTurn,
+    }
+}
+
+fn convert_init_response(resp: sdk::InitializeResponse) -> InitializeResult {
+    let caps = resp.agent_capabilities;
+    InitializeResult {
+        protocol_version: caps.load_session as u16, // placeholder, not used
+        capabilities: AgentCapabilities {
+            load_session: Some(caps.load_session),
+            prompt_capabilities: Some(PromptCapabilities {
+                audio: caps.prompt_capabilities.audio,
+                image: caps.prompt_capabilities.image,
+                embedded_context: caps.prompt_capabilities.embedded_context,
+            }),
+            mcp_capabilities: None,
+            session_capabilities: None,
+        },
+        agent_info: resp.agent_info.map(|i| AgentInfo {
+            name: i.name,
+            title: i.title,
+            version: Some(i.version),
+        }),
+        auth_methods: resp
+            .auth_methods
+            .into_iter()
+            .map(|m| AuthMethod {
+                id: m.id().to_string(),
+                name: m.name().to_owned(),
+                description: m.description().map(|s| s.to_owned()),
+            })
+            .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 
 /// Configuration for launching an ACP agent.
 #[derive(Debug, Clone)]
@@ -44,10 +330,11 @@ impl AgentConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DisplayLine
+// ---------------------------------------------------------------------------
+
 /// A single entry in the agent panel display buffer.
-///
-/// Pushed by `handle_acp_message` for every `SessionUpdate` variant.
-/// Rendered by `AgentPanel` with per-kind styles.
 #[derive(Debug, Clone)]
 pub enum DisplayLine {
     /// Normal assistant text (may span multiple physical lines).
@@ -60,7 +347,13 @@ pub enum DisplayLine {
     ToolDone { id: String, status: String },
     /// Plan step from a `PlanUpdate`.
     PlanStep { done: bool, description: String },
+    /// Visual divider between conversation turns.
+    Separator,
 }
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
 
 /// An ACP agent client connected via stdio.
 #[derive(Debug)]
@@ -68,30 +361,34 @@ pub struct Client {
     pub id: AgentId,
     pub name: String,
     _process: Child,
-    server_tx: UnboundedSender<Payload>,
-    request_counter: Arc<AtomicU64>,
+    rpc_tx: UnboundedSender<AgentRpcCall>,
     /// Negotiated agent capabilities, set after `initialize()` completes.
     pub capabilities: Option<AgentCapabilities>,
     /// The active session ID, set after `session_new()` or `session_load()`.
     pub session_id: Option<SessionId>,
+    /// Auth methods declared by agent during initialize. Empty if none required.
+    pub auth_methods: Vec<AuthMethod>,
     /// Structured display buffer, accumulated from `session/update` notifications.
-    /// Cleared at the start of each new prompt.
     pub display: Vec<DisplayLine>,
-    /// True while a `session/prompt` job is in flight. Used by AgentPanel to show spinner.
+    /// True while a `session/prompt` job is in flight.
     pub is_prompting: bool,
+    /// Tracks file paths for in-progress "edit" tool calls.
+    pub pending_edits: std::collections::HashMap<String, Vec<String>>,
+    /// Current session mode received via `CurrentModeUpdate`.
+    pub current_mode: Option<String>,
+    /// Set to true by the permission dialog when the user selects an `AllowAlways` option.
+    pub auto_continue: Arc<AtomicBool>,
+    /// True after the user has selected "auto-accept edits" for this session.
+    pub auto_accept_edits: bool,
+    /// Latest token usage received via `UsageUpdate`: (used, size, cost_amount, currency).
+    pub usage: Option<(u64, u64, f64, String)>,
 }
 
 impl Client {
-    /// Spawn the agent subprocess and set up the transport.
-    ///
-    /// Returns the client and an incoming message channel.  The caller is
-    /// responsible for polling the channel and dispatching agent-initiated
-    /// requests (`fs/*`, `terminal/*`, `session/request_permission`) and
-    /// notifications (`session/update`, `$/disconnected`).
     pub fn start(
         config: &AgentConfig,
         id: AgentId,
-    ) -> Result<(Self, UnboundedReceiver<(AgentId, jsonrpc::Call)>)> {
+    ) -> Result<(Self, UnboundedReceiver<(AgentId, AcpEvent)>)> {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .envs(&config.env)
@@ -118,246 +415,148 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("agent stderr unavailable"))?;
 
         let name = config.command.clone();
-        let (rx, tx) = transport::Transport::start(
-            BufReader::new(stdout),
-            BufWriter::new(stdin),
-            BufReader::new(stderr),
-            id,
-            name.clone(),
-        );
+        let agent_id = id;
+
+        let (event_tx, event_rx) = unbounded_channel::<(AgentId, AcpEvent)>();
+        let (rpc_tx, rpc_rx) = unbounded_channel::<AgentRpcCall>();
+
+        let event_tx_handler = event_tx.clone();
+        let event_tx_io = event_tx;
+
+        std::thread::Builder::new()
+            .name(format!("acp-{agent_id}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build ACP tokio runtime");
+
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    let handler = HelixClientHandler {
+                        agent_id,
+                        event_tx: event_tx_handler,
+                    };
+
+                    let (conn, io_task) = sdk::ClientSideConnection::new(
+                        handler,
+                        stdin.compat_write(),
+                        stdout.compat(),
+                        |fut| {
+                            tokio::task::spawn_local(fut);
+                        },
+                    );
+
+                    let conn = Rc::new(conn);
+
+                    // Log stderr from the agent subprocess.
+                    tokio::task::spawn_local(async move {
+                        use tokio::io::{AsyncBufReadExt, BufReader};
+                        let mut lines = BufReader::new(stderr).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            log::debug!("ACP {agent_id} stderr: {line}");
+                        }
+                    });
+
+                    // Drive the SDK I/O loop; send Disconnected when it ends.
+                    tokio::task::spawn_local(async move {
+                        if let Err(e) = io_task.await {
+                            log::error!("ACP {agent_id}: I/O error: {e}");
+                        }
+                        log::info!("ACP {agent_id}: disconnected");
+                        let _ = event_tx_io.send((agent_id, AcpEvent::Disconnected));
+                    });
+
+                    // Process outgoing RPC calls until the channel closes.
+                    rpc_actor(conn, rpc_rx).await;
+                });
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn ACP thread: {e}"))?;
 
         let client = Client {
             id,
             name,
             _process: process,
-            server_tx: tx,
-            request_counter: Arc::new(AtomicU64::new(0)),
+            rpc_tx,
             capabilities: None,
             session_id: None,
+            auth_methods: Vec::new(),
             display: Vec::new(),
             is_prompting: false,
+            pending_edits: std::collections::HashMap::new(),
+            current_mode: None,
+            auto_continue: Arc::new(AtomicBool::new(false)),
+            auto_accept_edits: false,
+            usage: None,
         };
 
-        Ok((client, rx))
+        Ok((client, event_rx))
     }
 
     // ------------------------------------------------------------------
-    // Internal helpers
+    // Lifecycle methods (synchronous-ish wrappers calling ClientHandle methods)
     // ------------------------------------------------------------------
 
-    fn next_request_id(&self) -> u64 {
-        self.request_counter.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Send a request and await the response, deserializing it into `R`.
-    pub async fn call<R: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: impl Serialize,
-    ) -> Result<R> {
-        let id = self.next_request_id();
-
-        let params_value = serde_json::to_value(&params)?;
-        let params = match params_value {
-            Value::Object(map) => jsonrpc::Params::Map(map),
-            Value::Array(arr) => jsonrpc::Params::Array(arr),
-            Value::Null => jsonrpc::Params::None,
-            other => jsonrpc::Params::Array(vec![other]),
-        };
-
-        let method_call = jsonrpc::MethodCall {
-            jsonrpc: Some(jsonrpc::Version::V2),
-            method: method.to_owned(),
-            params,
-            id: jsonrpc::Id::Num(id),
-        };
-
-        // Channel capacity 1 — exactly one response per request.
-        let (tx, mut rx) = channel(1);
-        self.server_tx
-            .send(Payload::Request {
-                chan: tx,
-                value: method_call,
-            })
-            .map_err(|_| Error::StreamClosed)?;
-
-        let value = rx.recv().await.ok_or(Error::StreamClosed)??;
-        serde_json::from_value(value).map_err(Into::into)
-    }
-
-    /// Send a notification (no response expected).
-    pub fn notify(&self, method: &str, params: impl Serialize) {
-        let params_value = match serde_json::to_value(&params) {
-            Ok(v) => v,
-            Err(err) => {
-                log::error!("{}: failed to serialize notification '{method}': {err}", self.name);
-                return;
-            }
-        };
-        let params = match params_value {
-            Value::Object(map) => jsonrpc::Params::Map(map),
-            Value::Array(arr) => jsonrpc::Params::Array(arr),
-            Value::Null => jsonrpc::Params::None,
-            other => jsonrpc::Params::Array(vec![other]),
-        };
-
-        let notification = jsonrpc::Notification {
-            jsonrpc: Some(jsonrpc::Version::V2),
-            method: method.to_owned(),
-            params,
-        };
-        let _ = self.server_tx.send(Payload::Notification(notification));
-    }
-
-    /// Send a response to an agent-initiated request.
-    pub fn reply(&self, id: jsonrpc::Id, result: Result<Value>) {
-        let output = match result {
-            Ok(value) => jsonrpc::Output::Success(jsonrpc::Success {
-                jsonrpc: Some(jsonrpc::Version::V2),
-                result: value,
-                id,
-            }),
-            Err(err) => jsonrpc::Output::Failure(jsonrpc::Failure {
-                jsonrpc: Some(jsonrpc::Version::V2),
-                error: jsonrpc::Error::internal_error(err.to_string()),
-                id,
-            }),
-        };
-        let _ = self.server_tx.send(Payload::Response(output));
-    }
-
-    /// Send an error response to an agent-initiated request.
-    pub fn reply_error(&self, id: jsonrpc::Id, error: jsonrpc::Error) {
-        let output = jsonrpc::Output::Failure(jsonrpc::Failure {
-            jsonrpc: Some(jsonrpc::Version::V2),
-            error,
-            id,
-        });
-        let _ = self.server_tx.send(Payload::Response(output));
-    }
-
-    /// Return a cloneable sender for use in `'static` callbacks.
-    pub fn sender(&self) -> UnboundedSender<Payload> {
-        self.server_tx.clone()
-    }
-
-    // ------------------------------------------------------------------
-    // ACP lifecycle methods
-    // ------------------------------------------------------------------
-
-    /// Perform the `initialize` handshake, negotiating protocol version and
-    /// exchanging capabilities.  Must be called first before any other method.
     pub async fn initialize(&mut self) -> Result<()> {
-        let params = InitializeParams {
-            protocol_version: PROTOCOL_VERSION,
-            capabilities: ClientCapabilities {
-                filesystem: Some(FileSystemCapabilities {
-                    read_text_file: true,
-                    write_text_file: true,
-                }),
-                terminal: Some(TerminalCapabilities::default()),
-            },
-            client_info: Some(ClientInfo {
-                name: "helix".to_owned(),
-                title: Some("Helix Editor".to_owned()),
-                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-            }),
-        };
-
-        let result: InitializeResult = self.call("initialize", params).await?;
+        let handle = self.handle();
+        let result = handle.initialize().await?;
         log::info!(
             "ACP agent '{}' initialized (protocol_version={})",
             self.name,
             result.protocol_version
         );
         self.capabilities = Some(result.capabilities);
+        self.auth_methods = result.auth_methods;
         Ok(())
     }
 
-    /// Authenticate with the agent.  In the simplest case this sends an empty
-    /// map; the agent may require additional fields via the `extra` map.
     pub async fn authenticate(&self, params: AuthenticateParams) -> Result<()> {
-        let _: AuthenticateResult = self.call("authenticate", params).await?;
-        Ok(())
+        self.handle().authenticate(params).await
     }
 
-    // ------------------------------------------------------------------
-    // Session methods
-    // ------------------------------------------------------------------
-
-    /// Create a new conversation session.
-    pub async fn session_new(&mut self) -> Result<SessionId> {
-        let result: NewSessionResult = self
-            .call("session/new", NewSessionParams::default())
-            .await?;
-        self.session_id = Some(result.session_id.clone());
-        log::info!("ACP agent '{}' session created: {}", self.name, result.session_id);
-        Ok(result.session_id)
+    pub async fn session_new(&mut self, cwd: String) -> Result<SessionId> {
+        let result = self.handle().session_new(cwd).await?;
+        let sid = result.session_id.clone();
+        self.session_id = Some(sid.clone());
+        log::info!("ACP agent '{}' session created: {}", self.name, sid);
+        Ok(sid)
     }
 
-    /// Resume a previous conversation session.
     pub async fn session_load(&mut self, session_id: SessionId) -> Result<()> {
-        let _: LoadSessionResult = self
-            .call("session/load", LoadSessionParams { session_id: session_id.clone() })
-            .await?;
+        self.handle().session_load(session_id.clone()).await?;
         self.session_id = Some(session_id);
         Ok(())
     }
 
-    /// Send a user prompt and wait for the agent's stop reason.
-    ///
-    /// While waiting, the agent will emit `session/update` notifications via
-    /// the incoming channel (streamed message chunks, tool calls, plans, …).
     pub async fn session_prompt(
         &self,
         session_id: SessionId,
         prompt: Vec<ContentBlock>,
     ) -> Result<StopReason> {
-        let result: PromptResult = self
-            .call("session/prompt", PromptParams { session_id, prompt })
-            .await?;
-        Ok(result.stop_reason)
+        self.handle().session_prompt(session_id, prompt).await
     }
 
-    /// Cancel an ongoing prompt turn (one-way notification, no response).
     pub fn session_cancel(&self, session_id: SessionId) {
-        self.notify("session/cancel", CancelParams { session_id });
+        let _ = self.rpc_tx.send(AgentRpcCall::Cancel { session_id });
     }
 
-    /// Change the active mode of a session.
     pub async fn session_set_mode(
         &self,
         session_id: SessionId,
         mode: String,
     ) -> Result<()> {
-        let _: SetModeResult = self
-            .call("session/set_mode", SetModeParams { session_id, mode })
-            .await?;
-        Ok(())
+        self.handle().session_set_mode(session_id, mode).await
     }
 
-    /// Set a session configuration option.
     pub async fn session_set_config_option(
         &self,
         session_id: SessionId,
         option_id: String,
         value: String,
     ) -> Result<()> {
-        let _: SetConfigOptionResult = self
-            .call(
-                "session/set_config_option",
-                SetConfigOptionParams { session_id, option_id, value },
-            )
-            .await?;
-        Ok(())
+        self.handle().session_set_config_option(session_id, option_id, value).await
     }
 
-    // ------------------------------------------------------------------
-    // Convenience: send a plain-text prompt on the current session
-    // ------------------------------------------------------------------
-
-    /// Prompt the current session with a plain text message.
-    /// Returns `Err` if no session has been created yet.
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<StopReason> {
         let session_id = self
             .session_id
@@ -366,20 +565,16 @@ impl Client {
         self.session_prompt(session_id, vec![ContentBlock::text(text)]).await
     }
 
-    /// Create a lightweight cloneable handle for use in background tasks (Jobs).
-    /// The handle shares the transport sender and request counter with this client.
+    /// Create a lightweight cloneable handle for use in background tasks.
     pub fn handle(&self) -> ClientHandle {
         ClientHandle {
             id: self.id,
             name: self.name.clone(),
-            server_tx: self.server_tx.clone(),
-            request_counter: Arc::clone(&self.request_counter),
+            rpc_tx: self.rpc_tx.clone(),
         }
     }
 
-
     /// Concatenate all [`DisplayLine::Text`] entries into a single string.
-    /// Used for tests and for producing a plain-text fallback.
     pub fn response_text(&self) -> String {
         self.display
             .iter()
@@ -399,89 +594,28 @@ impl Client {
 // ---------------------------------------------------------------------------
 
 /// A lightweight cloneable handle for use in background tasks (Jobs).
-/// Shares the transport sender and request counter with the owning `Client`.
 #[derive(Clone)]
 pub struct ClientHandle {
     pub id: AgentId,
     name: String,
-    server_tx: UnboundedSender<Payload>,
-    request_counter: Arc<AtomicU64>,
+    rpc_tx: UnboundedSender<AgentRpcCall>,
 }
 
 impl ClientHandle {
-    fn next_request_id(&self) -> u64 {
-        self.request_counter.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Send a request and await the response, deserializing it into `R`.
-    pub async fn call<R: DeserializeOwned>(&self, method: &str, params: impl Serialize) -> Result<R> {
-        let id = self.next_request_id();
-
-        let params_value = serde_json::to_value(&params)?;
-        let params = match params_value {
-            Value::Object(map) => jsonrpc::Params::Map(map),
-            Value::Array(arr) => jsonrpc::Params::Array(arr),
-            Value::Null => jsonrpc::Params::None,
-            other => jsonrpc::Params::Array(vec![other]),
-        };
-
-        let method_call = jsonrpc::MethodCall {
-            jsonrpc: Some(jsonrpc::Version::V2),
-            method: method.to_owned(),
-            params,
-            id: jsonrpc::Id::Num(id),
-        };
-
-        let (tx, mut rx) = channel(1);
-        self.server_tx
-            .send(Payload::Request {
-                chan: tx,
-                value: method_call,
-            })
+    /// Helper: send an RPC call and await the reply.
+    async fn call<T>(
+        &self,
+        make_call: impl FnOnce(oneshot::Sender<Result<T>>) -> AgentRpcCall,
+    ) -> Result<T> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rpc_tx
+            .send(make_call(reply_tx))
             .map_err(|_| Error::StreamClosed)?;
-
-        let value = rx.recv().await.ok_or(Error::StreamClosed)??;
-        serde_json::from_value(value).map_err(Into::into)
+        reply_rx.await.map_err(|_| Error::StreamClosed)?
     }
 
-    /// Send a fire-and-forget notification (no response expected).
-    fn notify(&self, method: &str, params: impl Serialize) -> Result<()> {
-        let params_value = serde_json::to_value(&params)?;
-        let params = match params_value {
-            Value::Object(map) => jsonrpc::Params::Map(map),
-            Value::Array(arr) => jsonrpc::Params::Array(arr),
-            Value::Null => jsonrpc::Params::None,
-            other => jsonrpc::Params::Array(vec![other]),
-        };
-        let notification = jsonrpc::Notification {
-            jsonrpc: Some(jsonrpc::Version::V2),
-            method: method.to_owned(),
-            params,
-        };
-        self.server_tx
-            .send(Payload::Notification(notification))
-            .map_err(|_| Error::StreamClosed)?;
-        Ok(())
-    }
-
-    /// Run the initialize handshake. Returns the result to store on the Client.
     pub async fn initialize(&self) -> Result<InitializeResult> {
-        let params = InitializeParams {
-            protocol_version: PROTOCOL_VERSION,
-            capabilities: ClientCapabilities {
-                filesystem: Some(FileSystemCapabilities {
-                    read_text_file: true,
-                    write_text_file: true,
-                }),
-                terminal: Some(TerminalCapabilities::default()),
-            },
-            client_info: Some(ClientInfo {
-                name: "helix".to_owned(),
-                title: Some("Helix Editor".to_owned()),
-                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-            }),
-        };
-        let result: InitializeResult = self.call("initialize", params).await?;
+        let result = self.call(|reply| AgentRpcCall::Initialize { reply }).await?;
         log::info!(
             "ACP agent '{}' initialized (protocol_version={})",
             self.name,
@@ -490,29 +624,49 @@ impl ClientHandle {
         Ok(result)
     }
 
-    /// Create a new conversation session. Returns the result to store on the Client.
-    pub async fn session_new(&self) -> Result<NewSessionResult> {
-        let result: NewSessionResult = self
-            .call("session/new", NewSessionParams::default())
-            .await?;
+    pub async fn authenticate(&self, params: AuthenticateParams) -> Result<()> {
+        self.call(|reply| AgentRpcCall::Authenticate { params, reply }).await
+    }
+
+    pub async fn session_new(&self, cwd: String) -> Result<NewSessionResult> {
+        let result = self.call(|reply| AgentRpcCall::NewSession { cwd, reply }).await?;
         log::info!("ACP agent '{}' session created: {}", self.name, result.session_id);
         Ok(result)
     }
 
-    /// Send a user prompt and wait for the agent's stop reason.
+    pub async fn session_load(&self, session_id: SessionId) -> Result<()> {
+        self.call(|reply| AgentRpcCall::LoadSession { session_id, reply }).await
+    }
+
     pub async fn session_prompt(
         &self,
         session_id: SessionId,
         prompt: Vec<ContentBlock>,
     ) -> Result<StopReason> {
-        let result: PromptResult = self
-            .call("session/prompt", PromptParams { session_id, prompt })
-            .await?;
-        Ok(result.stop_reason)
+        self.call(|reply| AgentRpcCall::Prompt { session_id, prompt, reply }).await
     }
 
-    /// Cancel an ongoing prompt turn (fire-and-forget notification).
     pub fn session_cancel(&self, session_id: SessionId) -> Result<()> {
-        self.notify("session/cancel", CancelParams { session_id })
+        self.rpc_tx
+            .send(AgentRpcCall::Cancel { session_id })
+            .map_err(|_| Error::StreamClosed)
+    }
+
+    pub async fn session_set_mode(
+        &self,
+        session_id: SessionId,
+        mode: String,
+    ) -> Result<()> {
+        self.call(|reply| AgentRpcCall::SetMode { session_id, mode, reply }).await
+    }
+
+    pub async fn session_set_config_option(
+        &self,
+        session_id: SessionId,
+        option_id: String,
+        value: String,
+    ) -> Result<()> {
+        self.call(|reply| AgentRpcCall::SetConfigOption { session_id, option_id, value, reply })
+            .await
     }
 }

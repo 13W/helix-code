@@ -40,6 +40,13 @@ impl<T: Item> Select<T> {
             options: menu,
         }
     }
+
+    /// Disable auto-close so that only Enter confirms and only Esc/Ctrl-C rejects.
+    /// Any other key is ignored and the dialog stays open.
+    pub fn no_auto_close(mut self) -> Self {
+        self.options.set_auto_close(false);
+        self
+    }
 }
 
 impl<T: Item> Component for Select<T> {

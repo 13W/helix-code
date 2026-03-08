@@ -3,7 +3,7 @@
 //! `Registry` manages all running ACP agents and merges their incoming message
 //! streams into a single channel that the application can poll in its event loop.
 
-use crate::{client::AgentConfig, jsonrpc, Client, AgentId, Result};
+use crate::{client::{AgentConfig, AcpEvent}, Client, AgentId, Result};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -18,8 +18,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 /// from any agent:
 ///
 /// ```rust,ignore
-/// while let Some((agent_id, call)) = registry.incoming.recv().await {
-///     // dispatch call…
+/// while let Some((agent_id, event)) = registry.incoming.recv().await {
+///     // dispatch event…
 /// }
 /// ```
 pub struct Registry {
@@ -27,9 +27,9 @@ pub struct Registry {
     next_id: u64,
     /// Sender half of the shared incoming channel.  Each per-agent forwarder
     /// task clones this and writes messages from its agent.
-    incoming_tx: UnboundedSender<(AgentId, jsonrpc::Call)>,
-    /// Unified stream of all incoming agent messages.
-    pub incoming: UnboundedReceiver<(AgentId, jsonrpc::Call)>,
+    incoming_tx: UnboundedSender<(AgentId, AcpEvent)>,
+    /// Unified stream of all incoming agent events.
+    pub incoming: UnboundedReceiver<(AgentId, AcpEvent)>,
 }
 
 impl Registry {

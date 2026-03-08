@@ -1243,7 +1243,7 @@ pub enum EditorEvent {
     ConfigEvent(ConfigEvent),
     LanguageServerMessage((LanguageServerId, Call)),
     DebuggerEvent((DebugAdapterId, dap::Payload)),
-    AcpMessage((helix_acp::AgentId, helix_acp::jsonrpc::Call)),
+    AcpMessage((helix_acp::AgentId, helix_acp::AcpEvent)),
     IdleTimer,
     Redraw,
 }

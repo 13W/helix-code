@@ -134,6 +134,10 @@ impl<T: Item> Menu<T> {
         self
     }
 
+    pub fn set_auto_close(&mut self, val: bool) {
+        self.auto_close = val;
+    }
+
     fn recalculate_size(&mut self, viewport: (u16, u16)) {
         let n = self
             .options
