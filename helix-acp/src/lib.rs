@@ -20,12 +20,14 @@
 //! ```
 
 pub mod client;
-pub mod jsonrpc;
 pub mod registry;
-pub mod transport;
 pub mod types;
 
-pub use client::{Client, ClientHandle, DisplayLine};
+/// Re-export the official ACP SDK so downstream phases can reach SDK types
+/// via `helix_acp::sdk::*` without needing a direct dep on `agent-client-protocol`.
+pub use agent_client_protocol as sdk;
+
+pub use client::{AcpEvent, Client, ClientHandle, DisplayLine, ReplyChannel};
 pub use registry::Registry;
 pub use types::*;
 
@@ -54,14 +56,6 @@ pub enum Error {
     #[error("stream closed")]
     StreamClosed,
 
-    /// Received a blank line — used internally by the transport; never
-    /// propagated to callers.
-    #[error("blank line")]
-    BlankLine,
-
-    #[error("agent error: {0}")]
-    Agent(jsonrpc::Error),
-
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
@@ -69,17 +63,5 @@ pub enum Error {
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Error::ParseError(e.to_string())
-    }
-}
-
-impl From<sonic_rs::Error> for Error {
-    fn from(e: sonic_rs::Error) -> Self {
-        Error::ParseError(e.to_string())
-    }
-}
-
-impl From<jsonrpc::Error> for Error {
-    fn from(e: jsonrpc::Error) -> Self {
-        Error::Agent(e)
     }
 }
