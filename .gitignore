@@ -4,3 +4,12 @@ helix-term/rustfmt.toml
 result
 runtime/grammars
 .DS_Store
+
+### local development
+.claude/
+.mcp.json
+.memory.json
+.serena/
+CLAUDE.md
+coverage-helix-dap.md
+coverage-helix-lsp.md
