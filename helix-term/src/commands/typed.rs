@@ -3005,10 +3005,13 @@ fn agent_prompt(
     cx.jobs.callback(async move {
         use crate::job::Callback;
         Ok(Callback::EditorCompositor(Box::new(move |_editor, compositor| {
-            compositor.replace_or_push(
-                crate::ui::AgentPanel::ID,
-                crate::ui::AgentPanel::new(agent_id),
-            );
+            if compositor
+                .find_id::<crate::ui::AgentPanel>(crate::ui::AgentPanel::ID)
+                .is_some()
+            {
+                compositor.remove(crate::ui::AgentPanel::ID);
+            }
+            compositor.push(Box::new(crate::ui::AgentPanel::new(agent_id)));
         })))
     });
 
