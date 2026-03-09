@@ -210,3 +210,86 @@ pub async fn handle_completions(params: CompletionsParams) -> anyhow::Result<Cal
     let json = serde_json::to_string_pretty(&json_items)?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
 }
+
+// ---------------------------------------------------------------------------
+// signature_help
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SignatureHelpParams {
+    /// Absolute path to the file.
+    pub path: String,
+    /// 0-indexed line number.
+    pub line: usize,
+    /// 0-indexed column number.
+    pub col: usize,
+}
+
+#[derive(Serialize)]
+pub struct ParameterInfoJson {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SignatureInfoJson {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    pub parameters: Vec<ParameterInfoJson>,
+}
+
+#[derive(Serialize)]
+pub struct SignatureHelpJson {
+    pub signatures: Vec<SignatureInfoJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_signature: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_parameter: Option<u32>,
+}
+
+pub async fn handle_signature_help(
+    params: SignatureHelpParams,
+) -> anyhow::Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let path = PathBuf::from(&params.path);
+    tx.send(McpCommand::SignatureHelp {
+        path,
+        line: params.line,
+        col: params.col,
+        reply: reply_tx,
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+    let result = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+
+    match result {
+        None => Ok(CallToolResult::success(vec![Content::text("null")])),
+        Some(info) => {
+            let json = SignatureHelpJson {
+                signatures: info
+                    .signatures
+                    .into_iter()
+                    .map(|s| SignatureInfoJson {
+                        label: s.label,
+                        documentation: s.documentation,
+                        parameters: s
+                            .parameters
+                            .into_iter()
+                            .map(|p| ParameterInfoJson {
+                                label: p.label,
+                                documentation: p.documentation,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                active_signature: info.active_signature,
+                active_parameter: info.active_parameter,
+            };
+            let text = serde_json::to_string_pretty(&json)?;
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }
+    }
+}

@@ -162,6 +162,26 @@ pub struct McpCompletionItem {
     pub insert_text: Option<String>,
 }
 
+/// A parameter entry in a signature returned by `signature_help`.
+pub struct ParameterInfo {
+    pub label: String,
+    pub documentation: Option<String>,
+}
+
+/// A single function signature returned by `signature_help`.
+pub struct SignatureInfo {
+    pub label: String,
+    pub documentation: Option<String>,
+    pub parameters: Vec<ParameterInfo>,
+}
+
+/// Result returned by `signature_help`.
+pub struct SignatureHelpInfo {
+    pub signatures: Vec<SignatureInfo>,
+    pub active_signature: Option<u32>,
+    pub active_parameter: Option<u32>,
+}
+
 /// Breakpoint info returned by `get_breakpoints` / `set_breakpoint`.
 pub struct BreakpointInfo {
     pub path: PathBuf,
@@ -285,6 +305,13 @@ pub enum McpCommand {
         new_name: String,
         reply: oneshot::Sender<anyhow::Result<WriteResult>>,
     },
+    /// Replace the body of a symbol identified by name-path (e.g. `"MyStruct/my_method"`).
+    ReplaceSymbol {
+        path: PathBuf,
+        name_path: String,
+        body: String,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
     /// Show a diff and ask the user for y/n permission.
     /// Sent internally by write command handlers; not exposed as an MCP tool.
     RequestPermission {
@@ -374,6 +401,15 @@ pub enum McpCommand {
         /// 0-indexed column number.
         col: usize,
         reply: oneshot::Sender<anyhow::Result<Vec<McpCompletionItem>>>,
+    },
+    /// Get function signature help (active signature + parameters) at (line, col).
+    SignatureHelp {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        reply: oneshot::Sender<anyhow::Result<Option<SignatureHelpInfo>>>,
     },
 
     // --- DAP: Breakpoints ---
@@ -612,6 +648,15 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
+    #[rmcp::tool(description = "Replace the body of a symbol identified by name-path (e.g. 'MyStruct' or 'MyStruct/my_method'). Shows a diff and requires user approval.")]
+    async fn replace_symbol(
+        &self,
+        params: Parameters<tools::write::ReplaceSymbolParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_replace_symbol(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
     #[rmcp::tool(description = "Get a high-level overview of symbols (functions, structs, etc.) in a file via LSP documentSymbol.")]
     async fn get_symbols_overview(
         &self,
@@ -716,6 +761,15 @@ impl HelixMcpServer {
         params: Parameters<tools::lsp_extras::CompletionsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::lsp_extras::handle_completions(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get function signature help (active signature and parameter info) at the specified position.")]
+    async fn signature_help(
+        &self,
+        params: Parameters<tools::lsp_extras::SignatureHelpParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_signature_help(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 
