@@ -328,7 +328,11 @@ impl Application {
                 Err(e) => {
                     log::warn!("helix-mcp: failed to start MCP server: {e}");
                 }
-            }
+        }
+
+        if args.mcp_auto_approve {
+            helix_mcp::set_auto_approve(true);
+        }
         }
 
         let app = Self {
@@ -884,6 +888,12 @@ impl Application {
                 diff,
                 reply,
             } => {
+                if helix_mcp::auto_approve() {
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        let _ = tx.send(true);
+                    }
+                    return;
+                }
                 use crate::ui::PromptEvent;
 
                 // Show a truncated diff preview in the status bar.
@@ -935,6 +945,30 @@ impl Application {
                     })
                     .count();
 
+                // Auto-approve: skip prompt and immediately write.
+                if helix_mcp::auto_approve() {
+                    let result = std::fs::write(&path, &content)
+                        .map_err(anyhow::Error::from)
+                        .map(|_| {
+                            if self.editor.document_by_path(&path).is_some() {
+                                Self::reload_document_by_path(&mut self.editor, &path);
+                            } else if let Err(e) =
+                                self.editor.open(&path, helix_view::editor::Action::Load)
+                            {
+                                log::warn!(
+                                    "MCP write_file: could not open {}: {e}",
+                                    path.display()
+                                );
+                            }
+                            WriteResult {
+                                path: path.clone(),
+                                lines_changed,
+                                saved: true,
+                            }
+                        });
+                    let _ = reply.send(result);
+                    return;
+                }
                 // Show diff preview in status.
                 let preview_len = diff.len().min(400);
                 let preview_len = diff
@@ -1074,7 +1108,30 @@ impl Application {
                             && !l.starts_with("---")
                     })
                     .count();
-
+                // Auto-approve: skip prompt and immediately write.
+                if helix_mcp::auto_approve() {
+                    let result = std::fs::write(&path, &new_content)
+                        .map_err(anyhow::Error::from)
+                        .map(|_| {
+                            if self.editor.document_by_path(&path).is_some() {
+                                Self::reload_document_by_path(&mut self.editor, &path);
+                            } else if let Err(e) =
+                                self.editor.open(&path, helix_view::editor::Action::Load)
+                            {
+                                log::warn!(
+                                    "MCP edit_file: could not open {}: {e}",
+                                    path.display()
+                                );
+                            }
+                            WriteResult {
+                                path: path.clone(),
+                                lines_changed,
+                                saved: true,
+                            }
+                        });
+                    let _ = reply.send(result);
+                    return;
+                }
                 let preview_len = diff.len().min(400);
                 let preview_len = diff
                     .char_indices()
@@ -1259,7 +1316,20 @@ impl Application {
                             helix_lsp::lsp::DocumentChanges::Operations(ops) => ops.len(),
                         })
                         .unwrap_or(0);
-
+                // Auto-approve: skip prompt and immediately apply.
+                if helix_mcp::auto_approve() {
+                    let result = self
+                        .editor
+                        .apply_workspace_edit(offset_encoding, &workspace_edit)
+                        .map(|_| WriteResult {
+                            path: path.clone(),
+                            lines_changed: changes_count,
+                            saved: false,
+                        })
+                        .map_err(|e| anyhow::anyhow!("apply_workspace_edit failed: {e:?}"));
+                    let _ = reply.send(result);
+                    return;
+                }
                 let reply = Arc::new(Mutex::new(Some(reply)));
                 let prompt = ui::Prompt::new(
                     format!(
@@ -2772,8 +2842,34 @@ impl Application {
                 let _ = reply.send(bps);
             }
 
+
             McpCommand::SetBreakpoint { path, line, condition, reply } => {
                 use crate::ui::PromptEvent;
+                // Auto-approve: skip prompt and immediately set breakpoint.
+                if helix_mcp::auto_approve() {
+                    let bp = helix_view::editor::Breakpoint {
+                        line,
+                        condition: condition.clone(),
+                        ..Default::default()
+                    };
+                    let bps = self.editor.breakpoints.entry(path.clone()).or_default();
+                    bps.push(bp);
+                    let idx = bps.len() - 1;
+                    if let Some(debugger) = self.editor.debug_adapters.get_active_client_mut() {
+                        if let Err(e) = helix_view::handlers::dap::breakpoints_changed(
+                            debugger,
+                            path.clone(),
+                            bps,
+                        ) {
+                            log::warn!("MCP set_breakpoint: DAP sync error: {e}");
+                        }
+                    }
+                    let info = Self::bp_to_info(&path, &self.editor.breakpoints[&path][idx]);
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        let _ = tx.send(Ok(info));
+                    }
+                    return;
+                }
                 let path2 = path.clone();
                 let prompt = crate::ui::Prompt::new(
                     format!(
