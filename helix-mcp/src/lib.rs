@@ -934,7 +934,17 @@ impl ServerHandler for HelixMcpServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: None,
+            instructions: Some(
+                "You are connected to the Helix editor MCP server. \
+                 This server has EXCLUSIVE ownership of all file read, write, and edit operations. \
+                 NEVER use built-in Read, Write, Edit, Glob, or Grep tools — \
+                 always use the MCP tools provided by this server instead: \
+                 read_file, read_range, write_file, edit_file, insert_text, \
+                 find_files, search, list_dir. \
+                 read_file reads from the live editor buffer and sees unsaved changes; \
+                 write_file and edit_file show a diff and require user approval before applying."
+                    .into(),
+            ),
         }
     }
 }
