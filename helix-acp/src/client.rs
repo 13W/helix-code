@@ -448,6 +448,9 @@ pub struct Client {
     pub session_id: Option<SessionId>,
     /// Auth methods declared by agent during initialize. Empty if none required.
     pub auth_methods: Vec<AuthMethod>,
+    /// The original session_id passed via --resume, if this agent resumed a prior session.
+    /// Used by the session picker to match running agents to JSONL file entries.
+    pub resume_session_id: Option<String>,
     /// Structured display buffer, accumulated from `session/update` notifications.
     pub display: Vec<DisplayLine>,
     /// True while a `session/prompt` job is in flight.
@@ -616,6 +619,7 @@ impl Client {
             capabilities: None,
             session_id: None,
             auth_methods: Vec::new(),
+            resume_session_id: None,
             display: Vec::new(),
             is_prompting: false,
             pending_edits: std::collections::HashMap::new(),
