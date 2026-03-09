@@ -18,6 +18,10 @@ pub struct AgentPanel {
     input: TextArea,
     /// Set during render(); used by cursor() to report screen position.
     input_area: Rect,
+    /// Cached visual-row height per DisplayLine entry, computed at `heights_width`.
+    line_heights: Vec<usize>,
+    /// Terminal width at which `line_heights` was computed. Invalidate on change.
+    heights_width: u16,
 }
 
 impl AgentPanel {
@@ -33,6 +37,8 @@ impl AgentPanel {
             page_height: 10,
             input,
             input_area: Rect::default(),
+            line_heights: Vec::new(),
+            heights_width: 0,
         }
     }
 
@@ -51,6 +57,27 @@ impl AgentPanel {
                 if chars == 0 { 1 } else { chars.div_ceil(w) }
             })
             .sum()
+    }
+
+    /// Compute the visual-row height of a single DisplayLine entry at the given width.
+    fn entry_height(
+        entry: &DisplayLine,
+        width: u16,
+        theme: &helix_view::Theme,
+        loader: &std::sync::Arc<arc_swap::ArcSwap<helix_core::syntax::Loader>>,
+        thought_style: helix_view::theme::Style,
+        tool_style: helix_view::theme::Style,
+        done_style: helix_view::theme::Style,
+    ) -> usize {
+        let spans = Self::build_lines(
+            std::slice::from_ref(entry),
+            theme,
+            loader,
+            thought_style,
+            tool_style,
+            done_style,
+        );
+        Self::count_visual_lines(&spans, width).max(1)
     }
 
     /// Build a `Vec<Spans>` from the client's display buffer.
@@ -275,17 +302,25 @@ impl Component for AgentPanel {
         let inner = block.inner(area).inner(Margin::horizontal(1));
         block.render(area, surface);
 
-        let mut lines = Self::build_lines(
-            &client.display,
-            &cx.editor.theme,
-            &cx.editor.syn_loader,
-            thought_style,
-            tool_style,
-            done_style,
-        );
-        // Show a placeholder while the first chunk is in flight.
-        if lines.is_empty() && is_prompting {
-            lines.push(Spans::from(Span::styled("...", thought_style)));
+        // --- Virtual rendering: maintain per-entry height cache ---
+
+        // Invalidate on resize.
+        if self.heights_width != inner.width {
+            self.line_heights.clear();
+            self.heights_width = inner.width;
+        }
+        // Append heights for new entries only (never recompute old ones).
+        for entry in &client.display[self.line_heights.len()..] {
+            let h = Self::entry_height(
+                entry,
+                inner.width,
+                &cx.editor.theme,
+                &cx.editor.syn_loader,
+                thought_style,
+                tool_style,
+                done_style,
+            );
+            self.line_heights.push(h);
         }
 
         let input_rows = self.input.visual_rows_for(inner.width) as u16;
@@ -294,17 +329,63 @@ impl Component for AgentPanel {
         let content_height = inner.height.saturating_sub(1 + input_rows);
         self.page_height = content_height as usize;
 
+        let total_rows: usize = self.line_heights.iter().sum();
+
         // Auto-scroll: pin to bottom while streaming (unless user scrolled up).
         if self.pinned {
-            let total_rows = Self::count_visual_lines(&lines, inner.width);
             self.scroll = total_rows.saturating_sub(content_height as usize);
+        }
+
+        let win_start = self.scroll;
+        let win_end = self.scroll + content_height as usize;
+
+        // Walk to find entry_start and the sub-entry scroll offset.
+        let mut cumulative = 0usize;
+        let mut entry_start = client.display.len(); // default: past end (empty window)
+        let mut scroll_within = 0usize;
+        for (i, &h) in self.line_heights.iter().enumerate() {
+            if cumulative + h > win_start {
+                entry_start = i;
+                scroll_within = win_start - cumulative;
+                break;
+            }
+            cumulative += h;
+        }
+
+        // Walk forward from entry_start to find entry_end.
+        let mut entry_end = entry_start;
+        let mut cum2 = cumulative;
+        for &h in &self.line_heights[entry_start..] {
+            entry_end += 1;
+            cum2 += h;
+            if cum2 >= win_end {
+                break;
+            }
+        }
+        // Add one buffer entry to avoid clipping at the bottom.
+        entry_end = (entry_end + 1).min(client.display.len());
+
+        // Build spans for the visible slice only.
+        let visible = &client.display[entry_start..entry_end];
+        let mut lines = Self::build_lines(
+            visible,
+            &cx.editor.theme,
+            &cx.editor.syn_loader,
+            thought_style,
+            tool_style,
+            done_style,
+        );
+
+        // Show a placeholder while the first chunk is in flight.
+        if lines.is_empty() && is_prompting {
+            lines.push(Spans::from(Span::styled("...", thought_style)));
         }
 
         let content_area = Rect::new(inner.x, inner.y, inner.width, content_height);
         let text = Text::from(lines);
         Paragraph::new(&text)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll as u16, 0))
+            .scroll((scroll_within as u16, 0))
             .render(content_area, surface);
 
         // Draw horizontal separator above input field.
@@ -726,23 +807,10 @@ fn config_option_current_label(
     config_options: &[helix_acp::sdk::SessionConfigOption],
     option_id: &str,
 ) -> Option<String> {
-    use helix_acp::sdk::{SessionConfigKind, SessionConfigSelectOptions};
+    use helix_acp::sdk::{SessionConfigKind};
     for opt in config_options {
         if opt.id.to_string() == option_id {
             if let SessionConfigKind::Select(sel) = &opt.kind {
-                let choices: Vec<_> = match &sel.options {
-                    SessionConfigSelectOptions::Ungrouped(opts) => opts.iter().collect(),
-                    SessionConfigSelectOptions::Grouped(groups) => {
-                        groups.iter().flat_map(|g| g.options.iter()).collect()
-                    }
-                    _ => vec![],
-                };
-                for choice in choices {
-                    if choice.value == sel.current_value {
-                        return Some(choice.name.clone());
-                    }
-                }
-                // Fallback: return the raw value id if no name found.
                 return Some(sel.current_value.to_string());
             }
         }
