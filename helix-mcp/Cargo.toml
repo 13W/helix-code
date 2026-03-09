@@ -1,0 +1,20 @@
+[package]
+name = "helix-mcp"
+description = "Embedded MCP server for Helix editor"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+rmcp = { version = "0.16.0", features = ["server", "macros", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+axum = "0.8"
+tokio = { version = "1", features = ["net", "rt", "macros"] }
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
