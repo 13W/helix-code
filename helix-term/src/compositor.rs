@@ -81,6 +81,10 @@ pub struct Compositor {
 
     pub(crate) last_picker: Option<Box<dyn Component>>,
     pub(crate) full_redraw: bool,
+    /// A permission dialog stashed when the agent panel is hidden; restored on re-open.
+    pub(crate) stashed_permission_dialog: Option<Box<dyn Component>>,
+    /// The agent panel stashed when toggled off; restored on re-open (preserves input text).
+    pub(crate) stashed_agent_panel: Option<Box<dyn Component>>,
 }
 
 impl Compositor {
@@ -90,6 +94,8 @@ impl Compositor {
             area,
             last_picker: None,
             full_redraw: false,
+            stashed_permission_dialog: None,
+            stashed_agent_panel: None,
         }
     }
 
