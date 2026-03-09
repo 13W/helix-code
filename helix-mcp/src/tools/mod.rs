@@ -3,5 +3,7 @@ pub mod editor;
 pub mod fs;
 pub mod lsp_extras;
 pub mod read;
+pub mod registers;
 pub mod symbols;
+pub mod vcs;
 pub mod write;

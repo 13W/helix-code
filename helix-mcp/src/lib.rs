@@ -208,6 +208,38 @@ pub struct VariableInfo {
     pub variables_ref: usize,
 }
 
+/// The kind of a diff hunk.
+pub enum HunkKind {
+    Added,
+    Deleted,
+    Modified,
+}
+
+/// A single diff hunk returned by `diff_hunks`.
+pub struct DiffHunk {
+    pub kind: HunkKind,
+    pub before_start: usize,
+    pub before_end: usize,
+    pub after_start: usize,
+    pub after_end: usize,
+}
+
+/// Result returned by `diff_hunks`.
+pub struct DiffResult {
+    pub path: PathBuf,
+    pub hunks: Vec<DiffHunk>,
+    /// Branch name or commit hash, if available.
+    pub head_ref: Option<String>,
+}
+
+/// A jumplist entry returned by `get_jumplist`.
+pub struct JumpEntry {
+    pub path: PathBuf,
+    /// 1-indexed line number.
+    pub line: usize,
+    pub col: usize,
+}
+
 /// Commands sent from MCP tools to the editor's event loop.
 pub enum McpCommand {
     ReadFile {
@@ -412,6 +444,37 @@ pub enum McpCommand {
     /// Step out of the current function.
     DapStepOut {
         reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+
+    // --- VCS: Diff ---
+
+    /// Get diff hunks for a file (must be open in the editor).
+    GetDiffHunks {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<DiffResult>>,
+    },
+    /// Get the HEAD base content via diff providers.
+    GetDiffBase {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
+
+    // --- Registers & Jumplist ---
+
+    /// Read values from a named register.
+    ReadRegister {
+        name: char,
+        reply: oneshot::Sender<anyhow::Result<Vec<String>>>,
+    },
+    /// Write values to a named register (a-z, A-Z, '+', '*' only).
+    WriteRegister {
+        name: char,
+        values: Vec<String>,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Get the jumplist for the current view.
+    GetJumplist {
+        reply: oneshot::Sender<Vec<JumpEntry>>,
     },
 }
 
@@ -755,6 +818,50 @@ impl HelixMcpServer {
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::dap::handle_dap_step_out().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get VCS diff hunks for a file (requires it to be open in the editor).")]
+    async fn diff_hunks(
+        &self,
+        params: Parameters<tools::vcs::DiffHunksParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::vcs::handle_diff_hunks(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get the HEAD (base) content of a file via VCS diff providers.")]
+    async fn diff_base(
+        &self,
+        params: Parameters<tools::vcs::DiffBaseParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::vcs::handle_diff_base(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Read the values stored in a named Helix register (e.g. '/', '+', 'a').")]
+    async fn read_register(
+        &self,
+        params: Parameters<tools::registers::ReadRegisterParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::registers::handle_read_register(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Write values to a named Helix register. Only alphabetic registers and '+' / '*' are writable.")]
+    async fn write_register(
+        &self,
+        params: Parameters<tools::registers::WriteRegisterParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::registers::handle_write_register(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get the jumplist for the current view (navigation history).")]
+    async fn get_jumplist(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::registers::handle_get_jumplist().await
             .map_err(tools::fs::to_mcp_err)
     }
 }
