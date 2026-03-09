@@ -78,6 +78,8 @@ enum AgentRpcCall {
     },
     NewSession {
         cwd: String,
+        /// Address of the Helix MCP server to pass to the agent, if running.
+        mcp_addr: Option<std::net::SocketAddr>,
         reply: oneshot::Sender<Result<NewSessionResult>>,
     },
     LoadSession {
@@ -240,8 +242,16 @@ async fn rpc_actor(
                     let _ = reply.send(result);
                 }
 
-                AgentRpcCall::NewSession { cwd, reply } => {
-                    let req = sdk::NewSessionRequest::new(std::path::PathBuf::from(cwd));
+                AgentRpcCall::NewSession { cwd, mcp_addr, reply } => {
+                    let mut req = sdk::NewSessionRequest::new(std::path::PathBuf::from(cwd));
+                    if let Some(addr) = mcp_addr {
+                        req = req.mcp_servers(vec![
+                            sdk::McpServer::Http(sdk::McpServerHttp::new(
+                                "helix",
+                                format!("http://{addr}/mcp"),
+                            )),
+                        ]);
+                    }
                     let result = conn.new_session(req).await
                         .map(|resp| NewSessionResult {
                             session_id: resp.session_id.to_string(),
@@ -643,8 +653,12 @@ impl Client {
         self.handle().authenticate(params).await
     }
 
-    pub async fn session_new(&mut self, cwd: String) -> Result<SessionId> {
-        let result = self.handle().session_new(cwd).await?;
+    pub async fn session_new(
+        &mut self,
+        cwd: String,
+        mcp_addr: Option<std::net::SocketAddr>,
+    ) -> Result<SessionId> {
+        let result = self.handle().session_new(cwd, mcp_addr).await?;
         let sid = result.session_id.clone();
         self.session_id = Some(sid.clone());
         self.config_options = result.config_options;
@@ -758,8 +772,14 @@ impl ClientHandle {
         self.call(|reply| AgentRpcCall::Authenticate { params, reply }).await
     }
 
-    pub async fn session_new(&self, cwd: String) -> Result<NewSessionResult> {
-        let result = self.call(|reply| AgentRpcCall::NewSession { cwd, reply }).await?;
+    pub async fn session_new(
+        &self,
+        cwd: String,
+        mcp_addr: Option<std::net::SocketAddr>,
+    ) -> Result<NewSessionResult> {
+        let result = self
+            .call(|reply| AgentRpcCall::NewSession { cwd, mcp_addr, reply })
+            .await?;
         log::info!("ACP agent '{}' session created: {}", self.name, result.session_id);
         Ok(result)
     }
