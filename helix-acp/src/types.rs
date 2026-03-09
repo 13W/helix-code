@@ -2,6 +2,7 @@
 //!
 //! All field names follow camelCase as required by the JSON specification for ACP.
 
+use agent_client_protocol as sdk;
 use serde::{Deserialize, Serialize};
 
 pub type ProtocolVersion = u16;
@@ -120,10 +121,11 @@ pub struct AuthenticateParams {
 // session/new
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct NewSessionResult {
     pub session_id: SessionId,
+    /// Configuration options (model, mode, …) received in the `session/new` response.
+    pub config_options: Vec<sdk::SessionConfigOption>,
 }
 
 // ---------------------------------------------------------------------------

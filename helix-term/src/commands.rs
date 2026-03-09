@@ -7161,6 +7161,7 @@ fn agent_toggle_panel(cx: &mut Context) {
                         let caps = init_result.capabilities;
                         let auth_methods = init_result.auth_methods;
                         let sid = session_result.session_id;
+                        let config_options = session_result.config_options;
 
                         if !auth_methods.is_empty() {
                             let has_claude_login =
@@ -7203,6 +7204,7 @@ fn agent_toggle_panel(cx: &mut Context) {
                                     client.capabilities = Some(caps);
                                     client.session_id = Some(sid.clone());
                                     client.auth_methods = auth_methods;
+                                    client.config_options = config_options;
                                 }
                                 log::info!("ACP: agent '{name}' ready (session={sid})");
                                 editor.set_status(format!("ACP: agent '{name}' ready"));

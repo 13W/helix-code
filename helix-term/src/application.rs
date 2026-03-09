@@ -81,6 +81,61 @@ pub struct Application {
     theme_mode: Option<theme::Mode>,
 }
 
+/// Format tool call arguments for display in the agent panel.
+///
+/// Priority:
+/// 1. `locations` — file paths from the tool call (e.g. for Read/Edit tools)
+/// 2. `raw_input` object — string/number values joined with ", "
+///
+/// Returns an empty string when no useful data is available.
+fn format_tool_input(
+    raw_input: Option<&serde_json::Value>,
+    locations: &[helix_acp::sdk::ToolCallLocation],
+) -> String {
+    // Prefer file locations (most human-readable).
+    if !locations.is_empty() {
+        let parts: Vec<String> = locations
+            .iter()
+            .map(|l| {
+                l.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| l.path.to_string_lossy().into_owned())
+            })
+            .collect();
+        let joined = parts.join(", ");
+        let truncated = if joined.len() > 60 {
+            format!("{}…", &joined[..57])
+        } else {
+            joined
+        };
+        return truncated;
+    }
+
+    // Fall back to raw_input object values.
+    if let Some(serde_json::Value::Object(map)) = raw_input {
+        let parts: Vec<String> = map
+            .values()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            let joined = parts.join(", ");
+            let truncated = if joined.len() > 60 {
+                format!("{}…", &joined[..57])
+            } else {
+                joined
+            };
+            return truncated;
+        }
+    }
+
+    String::new()
+}
+
 #[cfg(feature = "integration")]
 fn setup_integration_logging() {
     let level = std::env::var("HELIX_LOG_LEVEL")
@@ -754,9 +809,11 @@ impl Application {
                                 paths_to_open.push(loc.path.clone());
                             }
                         }
+                        let input = format_tool_input(tc.raw_input.as_ref(), &tc.locations);
                         client.display.push(DisplayLine::ToolCall {
                             id: id_s,
                             name: tc.title,
+                            input,
                         });
                     }
                     SessionUpdate::ToolCallUpdate(update) => {
@@ -816,8 +873,28 @@ impl Application {
                         if let Some(pos) = client.display.iter().position(|l| {
                             matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
                         }) {
+                            let (name, prev_input) =
+                                if let DisplayLine::ToolCall { name, input, .. } =
+                                    &client.display[pos]
+                                {
+                                    (name.clone(), input.clone())
+                                } else {
+                                    (String::new(), String::new())
+                                };
+                            // Prefer update's raw_input/locations; fall back to original input.
+                            let update_input = format_tool_input(
+                                update.fields.raw_input.as_ref(),
+                                update.fields.locations.as_deref().unwrap_or(&[]),
+                            );
+                            let input = if update_input.is_empty() {
+                                prev_input
+                            } else {
+                                update_input
+                            };
                             client.display[pos] = DisplayLine::ToolDone {
                                 id: id_s.clone(),
+                                name,
+                                input,
                                 status: status_str,
                                 output,
                             };

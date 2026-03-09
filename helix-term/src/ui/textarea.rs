@@ -7,10 +7,12 @@ pub struct TextArea {
     text: String,
     /// Char index (not byte index) of the cursor position.
     cursor: usize,
-    /// Index of the first visible line (0-based).
+    /// Index of the first visible VISUAL row (0-based).
     scroll: usize,
     /// Maximum number of visible rows (default 4).
     pub max_lines: usize,
+    /// Width passed to the last render(); 0 means wrap disabled.
+    area_width: u16,
 }
 
 impl Default for TextArea {
@@ -26,6 +28,7 @@ impl TextArea {
             cursor: 0,
             scroll: 0,
             max_lines: 4,
+            area_width: 0,
         }
     }
 
@@ -188,46 +191,63 @@ impl TextArea {
         }
     }
 
-    /// Number of rows actually visible: `min(line_count(), max_lines)`.
+    /// Total visual rows when rendered at `width` chars wide.
+    pub fn visual_rows_for(&self, width: u16) -> usize {
+        let w = width as usize;
+        let total: usize = self.text
+            .split('\n')
+            .map(|line| logical_line_vrows(line.chars().count(), w))
+            .sum();
+        total.min(self.max_lines)
+    }
+
+    /// Number of rows actually visible using the last rendered width.
     pub fn visual_rows(&self) -> usize {
-        self.line_count().min(self.max_lines)
+        self.visual_rows_for(self.area_width)
     }
 
     /// Render text content into `area` on `surface`.
     pub fn render(&mut self, area: Rect, surface: &mut Surface, style: Style) {
+        self.area_width = area.width;
         self.ensure_cursor_visible();
-        let lines: Vec<&str> = self.text.split('\n').collect();
-        let rows = self.visual_rows();
-        for row in 0..rows {
-            let line_idx = self.scroll + row;
-            if line_idx >= lines.len() {
-                break;
+
+        let width = area.width as usize;
+        let mut vrow = 0usize;     // global visual row counter
+        let mut screen_row = 0u16; // row within area
+
+        'outer: for line in self.text.split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            let total = chars.len();
+            let vrows = logical_line_vrows(total, width);
+
+            for vr in 0..vrows {
+                if vrow >= self.scroll {
+                    if screen_row >= area.height {
+                        break 'outer;
+                    }
+                    let start = vr * width;
+                    let end = (start + width).min(total);
+                    let chunk: String = chars[start..end].iter().collect();
+                    surface.set_stringn(area.x, area.y + screen_row, &chunk, width, style);
+                    screen_row += 1;
+                }
+                vrow += 1;
             }
-            surface.set_stringn(
-                area.x,
-                area.y + row as u16,
-                lines[line_idx],
-                area.width as usize,
-                style,
-            );
         }
     }
 
     /// Screen position `(col, row)` of the cursor relative to `area`.
-    /// Returns `None` if the cursor line is scrolled out of view.
+    /// Returns `None` if the cursor is scrolled out of view.
     pub fn cursor_screen_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let (cursor_line, cursor_col) = self.cursor_line_col();
-        if cursor_line < self.scroll {
+        let (cursor_vrow, cursor_vcol) = self.cursor_visual_row_col();
+        if cursor_vrow < self.scroll {
             return None;
         }
-        let display_row = cursor_line - self.scroll;
+        let display_row = cursor_vrow - self.scroll;
         if display_row >= self.visual_rows() {
             return None;
         }
-        Some((
-            area.x + cursor_col as u16,
-            area.y + display_row as u16,
-        ))
+        Some((area.x + cursor_vcol as u16, area.y + display_row as u16))
     }
 
     // ── Public position query ────────────────────────────────────────────────
@@ -249,13 +269,30 @@ impl TextArea {
         (line, col)
     }
 
-    /// Adjust `scroll` so the cursor line stays in `[scroll, scroll+max_lines)`.
+    /// `(visual_row, col_within_visual_row)` for the current cursor.
+    fn cursor_visual_row_col(&self) -> (usize, usize) {
+        let width = self.area_width as usize;
+        let (cursor_lline, cursor_lcol) = self.cursor_line_col();
+        let mut vrow = 0usize;
+        for (i, line) in self.text.split('\n').enumerate() {
+            let chars = line.chars().count();
+            if i == cursor_lline {
+                let vrow_within = if width == 0 { 0 } else { cursor_lcol / width };
+                let vcol = if width == 0 { cursor_lcol } else { cursor_lcol % width };
+                return (vrow + vrow_within, vcol);
+            }
+            vrow += logical_line_vrows(chars, width);
+        }
+        (0, 0)
+    }
+
+    /// Adjust `scroll` so the cursor visual row stays in `[scroll, scroll+max_lines)`.
     fn ensure_cursor_visible(&mut self) {
-        let (cursor_line, _) = self.cursor_line_col();
-        if cursor_line < self.scroll {
-            self.scroll = cursor_line;
-        } else if cursor_line >= self.scroll + self.max_lines {
-            self.scroll = cursor_line + 1 - self.max_lines;
+        let (cursor_vrow, _) = self.cursor_visual_row_col();
+        if cursor_vrow < self.scroll {
+            self.scroll = cursor_vrow;
+        } else if cursor_vrow >= self.scroll + self.max_lines {
+            self.scroll = cursor_vrow + 1 - self.max_lines;
         }
     }
 
@@ -278,6 +315,15 @@ impl TextArea {
             char_idx += l.chars().count() + 1; // +1 for the '\n'
         }
         char_idx
+    }
+}
+
+/// How many visual rows a logical line of `line_chars` chars needs at `width` cols.
+fn logical_line_vrows(line_chars: usize, width: usize) -> usize {
+    if width == 0 || line_chars == 0 {
+        1
+    } else {
+        (line_chars + width - 1) / width
     }
 }
 

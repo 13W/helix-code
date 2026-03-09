@@ -7,7 +7,7 @@ use tui::{
 
 use std::sync::Arc;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use helix_core::{
     syntax::{self, HighlightEvent, OverlayHighlights},
@@ -179,6 +179,7 @@ impl Markdown {
 
         let mut options = Options::empty();
         options.insert(Options::ENABLE_STRIKETHROUGH);
+        options.insert(Options::ENABLE_TABLES);
         let parser = Parser::new_ext(&self.contents, options);
 
         // TODO: if possible, render links as terminal hyperlinks: https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
@@ -223,6 +224,14 @@ impl Markdown {
             _ => Some(event),
         });
 
+        // Table buffering state
+        let mut table_alignments: Vec<Alignment> = Vec::new();
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
+        let mut table_is_head: Vec<bool> = Vec::new();
+        let mut current_row: Vec<String> = Vec::new();
+        let mut current_cell = String::new();
+        let mut in_table = false;
+
         for event in parser {
             match event {
                 Event::Start(Tag::List(list)) => {
@@ -265,6 +274,95 @@ impl Markdown {
                     let prefix = get_indent(list_stack.len()) + bullet.as_str();
                     spans.push(Span::styled(prefix, bullet_style));
                 }
+                Event::Start(Tag::Table(aligns)) => {
+                    table_alignments = aligns;
+                    table_rows.clear();
+                    table_is_head.clear();
+                    in_table = true;
+                }
+                Event::Start(Tag::TableHead) => {
+                    current_row.clear();
+                }
+                Event::Start(Tag::TableRow) => {
+                    current_row.clear();
+                }
+                Event::Start(Tag::TableCell) => {
+                    current_cell.clear();
+                }
+                Event::End(TagEnd::TableCell) => {
+                    current_row.push(std::mem::take(&mut current_cell));
+                }
+                Event::End(TagEnd::TableHead) => {
+                    table_is_head.push(true);
+                    table_rows.push(std::mem::take(&mut current_row));
+                }
+                Event::End(TagEnd::TableRow) => {
+                    table_is_head.push(false);
+                    table_rows.push(std::mem::take(&mut current_row));
+                }
+                Event::End(TagEnd::Table) => {
+                    in_table = false;
+                    let num_cols = table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                    let mut col_widths: Vec<usize> = vec![1; num_cols];
+                    for row in &table_rows {
+                        for (i, cell) in row.iter().enumerate() {
+                            col_widths[i] = col_widths[i].max(cell.chars().count());
+                        }
+                    }
+                    // top border
+                    {
+                        let mut s = String::from("┌");
+                        for (i, &w) in col_widths.iter().enumerate() {
+                            s.push_str(&"─".repeat(w + 2));
+                            s.push(if i + 1 < col_widths.len() { '┬' } else { '┐' });
+                        }
+                        lines.push(Spans::from(Span::styled(s, text_style)));
+                    }
+                    for (row_idx, (row, &is_head)) in
+                        table_rows.iter().zip(table_is_head.iter()).enumerate()
+                    {
+                        // render row
+                        {
+                            let mut s = String::from("│");
+                            for (i, cell) in row.iter().enumerate() {
+                                let w = col_widths.get(i).copied().unwrap_or(1);
+                                let align = table_alignments
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(Alignment::None);
+                                let padded = align_cell(cell, w, align);
+                                s.push(' ');
+                                s.push_str(&padded);
+                                s.push_str(" │");
+                            }
+                            let style = if is_head {
+                                text_style.add_modifier(Modifier::BOLD)
+                            } else {
+                                text_style
+                            };
+                            lines.push(Spans::from(Span::styled(s, style)));
+                        }
+                        let is_last = row_idx + 1 == table_rows.len();
+                        if is_last {
+                            // bottom border
+                            let mut s = String::from("└");
+                            for (i, &w) in col_widths.iter().enumerate() {
+                                s.push_str(&"─".repeat(w + 2));
+                                s.push(if i + 1 < col_widths.len() { '┴' } else { '┘' });
+                            }
+                            lines.push(Spans::from(Span::styled(s, text_style)));
+                        } else {
+                            // row divider
+                            let mut s = String::from("├");
+                            for (i, &w) in col_widths.iter().enumerate() {
+                                s.push_str(&"─".repeat(w + 2));
+                                s.push(if i + 1 < col_widths.len() { '┼' } else { '┤' });
+                            }
+                            lines.push(Spans::from(Span::styled(s, text_style)));
+                        }
+                    }
+                    lines.push(Spans::default()); // blank line after table
+                }
                 Event::Start(tag) => {
                     tags.push(tag);
                     if spans.is_empty() && !list_stack.is_empty() {
@@ -294,7 +392,9 @@ impl Markdown {
                     }
                 }
                 Event::Text(text) => {
-                    if let Some(Tag::CodeBlock(kind)) = tags.last() {
+                    if in_table {
+                        current_cell.push_str(&text);
+                    } else if let Some(Tag::CodeBlock(kind)) = tags.last() {
                         let language = match kind {
                             CodeBlockKind::Fenced(language) => language,
                             CodeBlockKind::Indented => "",
@@ -328,7 +428,11 @@ impl Markdown {
                     }
                 }
                 Event::Code(text) | Event::Html(text) => {
-                    spans.push(Span::styled(text, code_style));
+                    if in_table {
+                        current_cell.push_str(&text);
+                    } else {
+                        spans.push(Span::styled(text, code_style));
+                    }
                 }
                 Event::SoftBreak | Event::HardBreak => {
                     push_line(&mut spans, &mut lines);
@@ -388,5 +492,22 @@ impl Component for Markdown {
         let (width, height) = crate::ui::text::required_size(&contents, max_text_width);
 
         Some((width + padding, height + padding))
+    }
+}
+
+fn align_cell(text: &str, width: usize, align: Alignment) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.to_string();
+    }
+    let pad = width - len;
+    match align {
+        Alignment::Right => format!("{:>width$}", text, width = width),
+        Alignment::Center => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+        }
+        _ => format!("{:<width$}", text, width = width),
     }
 }
