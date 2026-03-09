@@ -48,6 +48,20 @@ pub enum AcpEvent {
     },
     /// Agent subprocess disconnected / exited.
     Disconnected,
+    /// Token cost from `session/update` with `usage_update`.
+    UsageUpdate {
+        used: u64,
+        size: u64,
+        amount: f64,
+        currency: String,
+    },
+    /// Per-turn token counts from `session/prompt` stop result.
+    TurnTokens {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    /// Updated config options returned by `session/set_config_option`.
+    ConfigOptionsUpdate(Vec<sdk::SessionConfigOption>),
 }
 
 // ---------------------------------------------------------------------------
@@ -153,14 +167,43 @@ impl sdk::Client for HelixClientHandler {
 // rpc_actor — runs in LocalSet; bridges AgentRpcCall → SDK calls
 // ---------------------------------------------------------------------------
 
+fn try_parse_usage_update(line: &[u8]) -> Option<(u64, u64, f64, String)> {
+    let v: serde_json::Value = serde_json::from_slice(line).ok()?;
+    if v.get("method")?.as_str()? != "session/update" {
+        return None;
+    }
+    let update = v.get("params")?.get("update")?;
+    if update.get("sessionUpdate")?.as_str()? != "usage_update" {
+        return None;
+    }
+    let used = update.get("used")?.as_u64()?;
+    let size = update.get("size")?.as_u64()?;
+    let cost = update.get("cost")?;
+    let amount = cost.get("amount")?.as_f64()?;
+    let currency = cost.get("currency")?.as_str()?.to_string();
+    Some((used, size, amount, currency))
+}
+
+fn try_parse_turn_tokens(line: &[u8]) -> Option<(u64, u64)> {
+    let v: serde_json::Value = serde_json::from_slice(line).ok()?;
+    v.get("id")?; // must be a response (has id)
+    let usage = v.get("result")?.get("usage")?;
+    let input = usage.get("inputTokens")?.as_u64()?;
+    let output = usage.get("outputTokens")?.as_u64()?;
+    Some((input, output))
+}
+
 async fn rpc_actor(
     conn: Rc<sdk::ClientSideConnection>,
     mut rpc_rx: UnboundedReceiver<AgentRpcCall>,
+    event_tx: UnboundedSender<(AgentId, AcpEvent)>,
+    agent_id: AgentId,
 ) {
     use sdk::Agent as _;
 
     while let Some(call) = rpc_rx.recv().await {
         let conn = Rc::clone(&conn);
+        let event_tx = event_tx.clone();
         tokio::task::spawn_local(async move {
             match call {
                 AgentRpcCall::Initialize { reply } => {
@@ -202,6 +245,7 @@ async fn rpc_actor(
                     let result = conn.new_session(req).await
                         .map(|resp| NewSessionResult {
                             session_id: resp.session_id.to_string(),
+                            config_options: resp.config_options.unwrap_or_default(),
                         })
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
@@ -220,7 +264,16 @@ async fn rpc_actor(
                 AgentRpcCall::Prompt { session_id, prompt, reply } => {
                     let sdk_prompt = prompt.into_iter().map(to_sdk_content_block).collect();
                     let req = sdk::PromptRequest::new(session_id, sdk_prompt);
-                    let result = conn.prompt(req).await
+                    let result = conn.prompt(req).await;
+                    if let Ok(ref resp) = result {
+                        if let Some(ref usage) = resp.usage {
+                            let _ = event_tx.send((agent_id, AcpEvent::TurnTokens {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                            }));
+                        }
+                    }
+                    let result = result
                         .map(|resp| convert_stop_reason(resp.stop_reason))
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
@@ -241,7 +294,13 @@ async fn rpc_actor(
 
                 AgentRpcCall::SetConfigOption { session_id, option_id, value, reply } => {
                     let req = sdk::SetSessionConfigOptionRequest::new(session_id, option_id, value);
-                    let result = conn.set_session_config_option(req).await
+                    let result = conn.set_session_config_option(req).await;
+                    if let Ok(ref resp) = result {
+                        let _ = event_tx.send((agent_id, AcpEvent::ConfigOptionsUpdate(
+                            resp.config_options.clone(),
+                        )));
+                    }
+                    let result = result
                         .map(|_| ())
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
@@ -357,6 +416,15 @@ pub enum DisplayLine {
 // Client
 // ---------------------------------------------------------------------------
 
+/// Accumulated token and cost statistics for the current session.
+#[derive(Debug, Default)]
+pub struct SessionUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_amount: f64,
+    pub currency: String,
+}
+
 /// An ACP agent client connected via stdio.
 #[derive(Debug)]
 pub struct Client {
@@ -382,12 +450,16 @@ pub struct Client {
     pub auto_continue: Arc<AtomicBool>,
     /// True after the user has selected "auto-accept edits" for this session.
     pub auto_accept_edits: bool,
-    /// Latest token usage received via `UsageUpdate`: (used, size, cost_amount, currency).
-    pub usage: Option<(u64, u64, f64, String)>,
+    /// Accumulated token and cost statistics for the current session.
+    pub session_usage: SessionUsage,
     /// Commands received via `AvailableCommandsUpdate`.
     pub available_commands: Vec<sdk::AvailableCommand>,
     /// Command text to drain into the textarea on the next panel event.
     pub pending_command: Option<String>,
+    /// Session config options (model, mode, …) from `session/new` or `ConfigOptionUpdate`.
+    pub config_options: Vec<sdk::SessionConfigOption>,
+    /// Pending (option_id, value) to apply via `session_set_config_option` from the UI.
+    pub pending_config_change: Option<(String, String)>,
 }
 
 impl Client {
@@ -427,6 +499,8 @@ impl Client {
         let (rpc_tx, rpc_rx) = unbounded_channel::<AgentRpcCall>();
 
         let event_tx_handler = event_tx.clone();
+        let event_tx_tee = event_tx.clone();
+        let event_tx_rpc = event_tx.clone();
         let event_tx_io = event_tx;
 
         std::thread::Builder::new()
@@ -444,10 +518,55 @@ impl Client {
                         event_tx: event_tx_handler,
                     };
 
+                    // Intercept stdout to parse usage_update and per-turn token counts.
+                    let (duplex_sdk, duplex_agent) = tokio::io::duplex(64 * 1024);
+                    tokio::task::spawn_local(async move {
+                        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                        let mut reader = BufReader::new(stdout);
+                        let mut writer = duplex_agent;
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            match reader.read_line(&mut line).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    let bytes = line.as_bytes();
+                                    if let Some((used, size, amount, currency)) =
+                                        try_parse_usage_update(bytes)
+                                    {
+                                        let _ = event_tx_tee.send((
+                                            agent_id,
+                                            AcpEvent::UsageUpdate {
+                                                used,
+                                                size,
+                                                amount,
+                                                currency,
+                                            },
+                                        ));
+                                    }
+                                    if let Some((input, output)) = try_parse_turn_tokens(bytes) {
+                                        let _ = event_tx_tee.send((
+                                            agent_id,
+                                            AcpEvent::TurnTokens {
+                                                input_tokens: input,
+                                                output_tokens: output,
+                                            },
+                                        ));
+                                    }
+                                    if writer.write_all(bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+
+                    // SDK reads from duplex instead of raw stdout.
                     let (conn, io_task) = sdk::ClientSideConnection::new(
                         handler,
                         stdin.compat_write(),
-                        stdout.compat(),
+                        duplex_sdk.compat(),
                         |fut| {
                             tokio::task::spawn_local(fut);
                         },
@@ -474,7 +593,7 @@ impl Client {
                     });
 
                     // Process outgoing RPC calls until the channel closes.
-                    rpc_actor(conn, rpc_rx).await;
+                    rpc_actor(conn, rpc_rx, event_tx_rpc, agent_id).await;
                 });
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn ACP thread: {e}"))?;
@@ -493,9 +612,11 @@ impl Client {
             current_mode: None,
             auto_continue: Arc::new(AtomicBool::new(false)),
             auto_accept_edits: false,
-            usage: None,
+            session_usage: SessionUsage::default(),
             available_commands: Vec::new(),
             pending_command: None,
+            config_options: Vec::new(),
+            pending_config_change: None,
         };
 
         Ok((client, event_rx))
@@ -526,6 +647,7 @@ impl Client {
         let result = self.handle().session_new(cwd).await?;
         let sid = result.session_id.clone();
         self.session_id = Some(sid.clone());
+        self.config_options = result.config_options;
         log::info!("ACP agent '{}' session created: {}", self.name, sid);
         Ok(sid)
     }
