@@ -79,6 +79,8 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
+
+    mcp_rx: Option<tokio::sync::mpsc::Receiver<helix_mcp::McpCommand>>,
 }
 
 /// Format tool call arguments for display in the agent panel.
@@ -306,6 +308,8 @@ impl Application {
         ])
         .context("build signal handler")?;
 
+        let mcp_rx = Some(helix_mcp::init_editor_channel());
+
         let app = Self {
             compositor,
             terminal,
@@ -315,6 +319,7 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
+            mcp_rx,
         };
 
         Ok(app)
@@ -415,6 +420,16 @@ impl Application {
                         if _idle_handled {
                             return true;
                         }
+                    }
+                }
+                cmd = async {
+                    match &mut self.mcp_rx {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    if let Some(cmd) = cmd {
+                        self.handle_mcp_command(cmd).await;
                     }
                 }
             }
@@ -748,6 +763,62 @@ impl Application {
         }
 
         false
+    }
+
+    async fn handle_mcp_command(&mut self, cmd: helix_mcp::McpCommand) {
+        use helix_mcp::{BufferInfo, McpCommand};
+        match cmd {
+            McpCommand::ReadFile { path, reply } => {
+                let result = if let Some(doc) = self.editor.document_by_path(&path) {
+                    Ok(doc.text().to_string())
+                } else {
+                    std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!(e))
+                };
+                let _ = reply.send(result);
+            }
+            McpCommand::ReadRange {
+                path,
+                start_line,
+                end_line,
+                reply,
+            } => {
+                let result = (|| -> anyhow::Result<String> {
+                    let text = if let Some(doc) = self.editor.document_by_path(&path) {
+                        doc.text().clone()
+                    } else {
+                        let s = std::fs::read_to_string(&path)?;
+                        helix_core::Rope::from(s)
+                    };
+                    let n = text.len_lines();
+                    if start_line > end_line {
+                        anyhow::bail!("start_line ({start_line}) > end_line ({end_line})");
+                    }
+                    let start_char = text.line_to_char(start_line.min(n));
+                    let end_char = text.line_to_char((end_line + 1).min(n));
+                    Ok(text.slice(start_char..end_char).to_string())
+                })();
+                let _ = reply.send(result);
+            }
+            McpCommand::GetOpenBuffers { reply } => {
+                let buffers = self
+                    .editor
+                    .documents()
+                    .filter_map(|doc| {
+                        doc.path().map(|p| BufferInfo {
+                            path: p.clone(),
+                            language: doc.language_name().map(String::from),
+                            is_modified: doc.is_modified(),
+                            line_count: doc.text().len_lines(),
+                            lsp_servers: doc
+                                .language_servers()
+                                .map(|ls| ls.name().to_owned())
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                let _ = reply.send(buffers);
+            }
+        }
     }
 
     async fn handle_acp_message(
