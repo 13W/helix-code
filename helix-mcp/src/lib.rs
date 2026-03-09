@@ -86,6 +86,82 @@ pub struct RefLocation {
     pub preview: String,
 }
 
+/// Editor mode returned by `get_cursor`.
+pub enum EditorMode {
+    Normal,
+    Insert,
+    Select,
+}
+
+/// Cursor state returned by `get_cursor`.
+pub struct CursorState {
+    pub path: Option<PathBuf>,
+    /// 1-indexed line number.
+    pub line: usize,
+    /// 1-indexed column number.
+    pub col: usize,
+    pub mode: EditorMode,
+    /// Number of cursors (multi-cursor count).
+    pub selection_count: usize,
+}
+
+/// A single selection range returned by `get_selections`.
+pub struct SelectionRange {
+    pub anchor_line: usize,
+    pub anchor_col: usize,
+    pub head_line: usize,
+    pub head_col: usize,
+    pub is_primary: bool,
+    pub text: String,
+}
+
+/// Viewport information returned by `get_viewport`.
+pub struct ViewportInfo {
+    /// 1-indexed first visible line.
+    pub first_visible_line: usize,
+    pub last_visible_line: usize,
+    pub height_lines: usize,
+    pub horizontal_offset: usize,
+}
+
+/// A diagnostic item returned by `get_diagnostics`.
+pub struct DiagnosticItem {
+    pub path: PathBuf,
+    /// 0-indexed line number.
+    pub line: usize,
+    /// 0-indexed column number.
+    pub col: usize,
+    pub severity: String,
+    pub message: String,
+    pub source: Option<String>,
+    pub code: Option<String>,
+}
+
+/// A code action item returned by `code_actions`.
+pub struct CodeActionItem {
+    pub title: String,
+    pub kind: Option<String>,
+}
+
+/// An inlay hint item returned by `inlay_hints`.
+pub struct InlayHintItem {
+    /// 0-indexed line number.
+    pub line: usize,
+    /// 0-indexed column number.
+    pub col: usize,
+    pub label: String,
+    /// "type" | "parameter" | "other"
+    pub kind: String,
+}
+
+/// A completion item returned by `completions`.
+pub struct McpCompletionItem {
+    pub label: String,
+    pub kind: Option<String>,
+    pub detail: Option<String>,
+    pub insert_text: Option<String>,
+}
+
 /// Commands sent from MCP tools to the editor's event loop.
 pub enum McpCommand {
     ReadFile {
@@ -167,6 +243,59 @@ pub enum McpCommand {
         path: PathBuf,
         name_path: String,
         reply: oneshot::Sender<anyhow::Result<SymbolMatch>>,
+    },
+    /// Get the current cursor position and editor mode.
+    GetCursor {
+        reply: oneshot::Sender<CursorState>,
+    },
+    /// Get all selection ranges for the document at `path`.
+    GetSelections {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<Vec<SelectionRange>>>,
+    },
+    /// Get the visible viewport range for the document at `path`.
+    GetViewport {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<ViewportInfo>>,
+    },
+    /// Get diagnostics. `path = None` returns all workspace diagnostics.
+    GetDiagnostics {
+        path: Option<PathBuf>,
+        reply: oneshot::Sender<Vec<DiagnosticItem>>,
+    },
+    /// Get hover documentation for the symbol at (line, col).
+    Hover {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        reply: oneshot::Sender<anyhow::Result<Option<String>>>,
+    },
+    /// Get available code actions at (line, col).
+    CodeActions {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        reply: oneshot::Sender<anyhow::Result<Vec<CodeActionItem>>>,
+    },
+    /// Get inlay hints for the given line range (0-indexed).
+    InlayHints {
+        path: PathBuf,
+        start_line: usize,
+        end_line: usize,
+        reply: oneshot::Sender<anyhow::Result<Vec<InlayHintItem>>>,
+    },
+    /// Get completion items at (line, col).
+    Completions {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        reply: oneshot::Sender<anyhow::Result<Vec<McpCompletionItem>>>,
     },
 }
 
@@ -337,6 +466,77 @@ impl HelixMcpServer {
         params: Parameters<tools::symbols::ReadSymbolParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::symbols::handle_read_symbol(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get the current cursor position, editor mode, and selection count.")]
+    async fn get_cursor(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::editor::handle_get_cursor().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get all selection ranges for a file, including anchor/head positions and selected text.")]
+    async fn get_selections(
+        &self,
+        params: Parameters<tools::editor::GetSelectionsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::editor::handle_get_selections(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get the visible viewport range (first/last visible line) for a file.")]
+    async fn get_viewport(
+        &self,
+        params: Parameters<tools::editor::GetViewportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::editor::handle_get_viewport(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get diagnostic information for a specific file from the language server.")]
+    async fn get_diagnostics(
+        &self,
+        params: Parameters<tools::lsp_extras::GetDiagnosticsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_get_diagnostics(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get hover information (type, documentation) for a symbol at the specified position.")]
+    async fn hover(
+        &self,
+        params: Parameters<tools::lsp_extras::HoverParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_hover(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get available code actions (quick fixes, refactors) at the specified position.")]
+    async fn code_actions(
+        &self,
+        params: Parameters<tools::lsp_extras::CodeActionsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_code_actions(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get inlay hints (type annotations, parameter names) for a line range in a file.")]
+    async fn inlay_hints(
+        &self,
+        params: Parameters<tools::lsp_extras::InlayHintsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_inlay_hints(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get completion suggestions at the specified position in a file.")]
+    async fn completions(
+        &self,
+        params: Parameters<tools::lsp_extras::CompletionsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::lsp_extras::handle_completions(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 }
