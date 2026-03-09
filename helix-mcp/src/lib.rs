@@ -54,6 +54,38 @@ pub struct BufferInfo {
     pub lsp_servers: Vec<String>,
 }
 
+/// A 0-indexed, inclusive line range.
+pub struct LineRange {
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// A symbol entry returned by `get_symbols_overview`.
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: String,
+    pub range: LineRange,
+    pub children: Vec<SymbolInfo>,
+}
+
+/// A symbol match returned by `find_symbol`.
+pub struct SymbolMatch {
+    pub name: String,
+    pub kind: String,
+    pub path: PathBuf,
+    pub range: LineRange,
+    /// Populated when `include_body = true`.
+    pub body: Option<String>,
+}
+
+/// A reference location returned by `find_refs`.
+pub struct RefLocation {
+    pub path: PathBuf,
+    pub line: usize,
+    pub col: usize,
+    pub preview: String,
+}
+
 /// Commands sent from MCP tools to the editor's event loop.
 pub enum McpCommand {
     ReadFile {
@@ -105,6 +137,36 @@ pub enum McpCommand {
         tool_name: String,
         diff: String,
         reply: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    },
+    /// Get the symbol hierarchy for a file via LSP `textDocument/documentSymbol`.
+    GetSymbolsOverview {
+        path: PathBuf,
+        /// 0 = top-level only, 1 = top-level + immediate children.
+        depth: u8,
+        reply: oneshot::Sender<anyhow::Result<(Vec<SymbolInfo>, String)>>,
+    },
+    /// Search symbols workspace-wide via LSP `workspace/symbol`.
+    FindSymbol {
+        query: String,
+        /// Optional path prefix to filter results.
+        path: Option<PathBuf>,
+        include_body: bool,
+        reply: oneshot::Sender<anyhow::Result<Vec<SymbolMatch>>>,
+    },
+    /// Find all references to the symbol at (line, col) via LSP `textDocument/references`.
+    FindRefs {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        reply: oneshot::Sender<anyhow::Result<Vec<RefLocation>>>,
+    },
+    /// Read the body of a symbol identified by name-path (e.g. `"MyStruct/my_method"`).
+    ReadSymbol {
+        path: PathBuf,
+        name_path: String,
+        reply: oneshot::Sender<anyhow::Result<SymbolMatch>>,
     },
 }
 
@@ -239,6 +301,42 @@ impl HelixMcpServer {
         params: Parameters<tools::write::RenameSymbolParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::write::handle_rename_symbol(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get a high-level overview of symbols (functions, structs, etc.) in a file via LSP documentSymbol.")]
+    async fn get_symbols_overview(
+        &self,
+        params: Parameters<tools::symbols::GetSymbolsOverviewParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::symbols::handle_get_symbols_overview(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Find symbols by name across the workspace via LSP workspace/symbol.")]
+    async fn find_symbol(
+        &self,
+        params: Parameters<tools::symbols::FindSymbolParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::symbols::handle_find_symbol(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Find all references to the symbol at the given file position via LSP textDocument/references.")]
+    async fn find_refs(
+        &self,
+        params: Parameters<tools::symbols::FindRefsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::symbols::handle_find_refs(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Read the source body of a symbol by name-path (e.g. 'MyStruct' or 'MyStruct/my_method').")]
+    async fn read_symbol(
+        &self,
+        params: Parameters<tools::symbols::ReadSymbolParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::symbols::handle_read_symbol(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 }
