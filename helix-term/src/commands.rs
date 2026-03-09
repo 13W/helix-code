@@ -7114,6 +7114,23 @@ fn lsp_or_syntax_workspace_symbol_picker(cx: &mut Context) {
     }
 }
 
+/// Read the Claude OAuth token.
+/// Priority: CLAUDE_CODE_OAUTH_TOKEN env var → ~/.claude/.credentials.json.
+pub(super) fn read_claude_oauth_token() -> Option<String> {
+    if let Ok(t) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        return Some(t);
+    }
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home)
+        .join(".claude")
+        .join(".credentials.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json["claudeAiOauth"]["accessToken"]
+        .as_str()
+        .map(|s| s.to_owned())
+}
+
 fn agent_toggle_panel(cx: &mut Context) {
     cx.callback.push(Box::new(|compositor, cx| {
         // Close if already open.
@@ -7167,7 +7184,7 @@ fn agent_toggle_panel(cx: &mut Context) {
                             let has_claude_login =
                                 auth_methods.iter().any(|m| m.id == "claude-login");
                             if has_claude_login {
-                                if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+                                if let Some(token) = read_claude_oauth_token() {
                                     use helix_acp::types::AuthenticateParams;
                                     let params = AuthenticateParams {
                                         extra: serde_json::json!({
