@@ -7280,16 +7280,19 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
 
 fn agent_toggle_panel(cx: &mut Context) {
     cx.callback.push(Box::new(|compositor, cx| {
-        // Close if already open.
+        // ── HIDE ──────────────────────────────────────────────────────────────
         if compositor
             .find_id::<crate::ui::AgentPanel>(crate::ui::AgentPanel::ID)
             .is_some()
         {
-            compositor.remove(crate::ui::AgentPanel::ID);
+            // Stash the panel itself — preserves input text and scroll position.
+            compositor.stashed_agent_panel = compositor.remove(crate::ui::AgentPanel::ID);
+            // Stash any active permission dialog so it can be restored on re-open.
+            compositor.stashed_permission_dialog = compositor.remove("acp-permission");
             return;
         }
 
-        // Show active agent if one is tracked, then any running agent, or start fresh.
+        // ── SHOW ──────────────────────────────────────────────────────────────
         let show_id: Option<helix_acp::AgentId> = cx
             .editor
             .acp
@@ -7298,7 +7301,16 @@ fn agent_toggle_panel(cx: &mut Context) {
             .or_else(|| cx.editor.acp.iter().next().map(|(id, _)| id));
         if let Some(id) = show_id {
             cx.editor.acp.active_agent_id = Some(id);
-            compositor.push(Box::new(crate::ui::AgentPanel::new(id)));
+            // Restore the stashed panel (preserves input); fall back to a fresh one.
+            let panel = compositor
+                .stashed_agent_panel
+                .take()
+                .unwrap_or_else(|| Box::new(crate::ui::AgentPanel::new(id)));
+            compositor.push(panel);
+            // Restore any stashed permission dialog on top of the panel.
+            if let Some(dialog) = compositor.stashed_permission_dialog.take() {
+                compositor.push(dialog);
+            }
         } else {
             start_agent_session(cx, None);
         }

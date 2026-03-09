@@ -58,52 +58,68 @@ impl<T: Item> Component for Select<T> {
         let (message_width, message_height) = self.message.required_size(viewport).unwrap();
         let (menu_width, menu_height) = self.options.required_size(viewport).unwrap();
         Some((
-            menu_width.max(message_width + 2),
-            message_height + menu_height + 2,
+            (message_width + 2).max(menu_width) + 2, // inner content + 2 border cols
+            message_height + 1 + menu_height + 2,    // msg + separator + menu + 2 border rows
         ))
     }
 
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        const BLOCK: Block<'_> = Block::bordered();
+        // +---------------------------+
+        // | message text              |
+        // |---------------------------|
+        // | ▶ Allow once              |
+        // |   Allow always            |
+        // |   Deny                    |
+        // +---------------------------+
 
-        // +---------------------+
-        // | message             |
-        // +---------------------+
-        //   options menu
-        //
-        //
+        let background = cx.editor.theme.get("ui.background");
+        let text_style = cx.editor.theme.get("ui.text");
+        let border_style = cx.editor.theme.get("ui.popup");
 
-        // Limit the text width to 80% of the screen or 80 columns, whichever is
-        // smaller.
+        // Limit the text width to 80% of the screen or 80 columns, whichever is smaller.
         let max_width = 80.min(((area.width as u32) * 80u32 / 100) as u16);
         let (message_width, message_height) =
             super::text::required_size(&self.message.contents, max_width);
-        let (_, menu_height) = self
+        let (menu_width, menu_height) = self
             .options
             .required_size((max_width, area.height))
             .unwrap();
-        // + 2 for borders and another + 2 for horizontal padding
-        let width = message_width + 4;
-        let height = message_height + 2 + menu_height;
-        let area = Rect {
-            x: (area.width / 2) - width / 2,
-            y: (area.height / 2) - height / 2,
-            width,
-            height,
-        };
 
-        // Message
-        let background = cx.editor.theme.get("ui.background");
-        let text = cx.editor.theme.get("ui.text");
-        let message_box = area.with_height(message_height + 2);
-        surface.clear_with(message_box, background.patch(text));
-        BLOCK.render(message_box, surface);
-        // Add horizontal padding so the message isn't too close to the border.
-        let message_area = BLOCK.inner(message_box).clip_left(1).clip_right(1);
-        self.message.render(message_area, surface, cx);
+        // Inner content width: wider of padded message or menu items.
+        let inner_width = (message_width + 2).max(menu_width);
+        let width = inner_width + 2; // +2 for left/right border
+        let height = message_height + 1 + menu_height + 2; // +2 for top/bottom border, +1 sep
 
-        // Options menu
-        let menu_area = area.clip_top(message_height + 2);
+        // Strictly center within the given area (origin-aware, no underflow).
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        let dialog = Rect::new(x, y, width.min(area.width), height.min(area.height));
+
+        surface.clear_with(dialog, background.patch(text_style));
+        Block::bordered()
+            .border_style(border_style)
+            .render(dialog, surface);
+
+        // `inner` is the area inside the border (1px stripped on all sides).
+        let inner = Block::bordered().inner(dialog);
+
+        // Message with 1-char horizontal padding so text isn't flush with the border.
+        let msg_area = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            message_height,
+        );
+        self.message.render(msg_area, surface, cx);
+
+        // ─── separator between message and options.
+        let sep_y = inner.y + message_height;
+        let sep: String = "─".repeat(inner.width as usize);
+        surface.set_string(inner.x, sep_y, &sep, border_style);
+
+        // Options menu below the separator.
+        let avail = inner.height.saturating_sub(message_height + 1);
+        let menu_area = Rect::new(inner.x, sep_y + 1, inner.width, avail.min(menu_height));
         self.options.render(menu_area, surface, cx);
     }
 }
