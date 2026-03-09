@@ -162,6 +162,52 @@ pub struct McpCompletionItem {
     pub insert_text: Option<String>,
 }
 
+/// Breakpoint info returned by `get_breakpoints` / `set_breakpoint`.
+pub struct BreakpointInfo {
+    pub path: PathBuf,
+    /// 0-indexed line number.
+    pub line: usize,
+    pub column: Option<usize>,
+    pub condition: Option<String>,
+    pub verified: bool,
+    pub id: Option<usize>,
+    pub message: Option<String>,
+}
+
+/// DAP session status returned by `get_dap_status`.
+pub struct DapStatus {
+    pub active: bool,
+    pub paused: bool,
+    pub thread_id: Option<usize>,
+    pub active_frame: Option<usize>,
+}
+
+/// A stack frame entry returned by `get_stack_trace`.
+/// Named `StackFrameInfo` to avoid conflict with `helix_dap::StackFrame`.
+pub struct StackFrameInfo {
+    pub id: usize,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    /// 0-indexed line number.
+    pub line: usize,
+    pub col: usize,
+    pub is_active: bool,
+}
+
+/// A scope entry returned by `get_scopes`.
+pub struct ScopeInfo {
+    pub name: String,
+    pub variables_ref: usize,
+}
+
+/// A variable entry returned by `get_variables`.
+pub struct VariableInfo {
+    pub name: String,
+    pub value: String,
+    pub type_name: Option<String>,
+    pub variables_ref: usize,
+}
+
 /// Commands sent from MCP tools to the editor's event loop.
 pub enum McpCommand {
     ReadFile {
@@ -296,6 +342,76 @@ pub enum McpCommand {
         /// 0-indexed column number.
         col: usize,
         reply: oneshot::Sender<anyhow::Result<Vec<McpCompletionItem>>>,
+    },
+
+    // --- DAP: Breakpoints ---
+
+    /// Return all breakpoints, optionally filtered to a single file path.
+    GetBreakpoints {
+        path: Option<PathBuf>,
+        reply: oneshot::Sender<Vec<BreakpointInfo>>,
+    },
+    /// Set a breakpoint (requires user approval via prompt).
+    SetBreakpoint {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        condition: Option<String>,
+        reply: Arc<Mutex<Option<oneshot::Sender<anyhow::Result<BreakpointInfo>>>>>,
+    },
+    /// Remove the breakpoint at the given path and 0-indexed line.
+    RemoveBreakpoint {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+
+    // --- DAP: State ---
+
+    /// Get current DAP session status (safe to call even when no session is active).
+    GetDapStatus {
+        reply: oneshot::Sender<DapStatus>,
+    },
+    /// Get the call stack for the active (or specified) thread.
+    GetStackTrace {
+        /// `None` uses the active thread.
+        thread_id: Option<usize>,
+        reply: oneshot::Sender<anyhow::Result<Vec<StackFrameInfo>>>,
+    },
+    /// Get the variable scopes for the given stack frame id.
+    GetScopes {
+        frame_id: usize,
+        reply: oneshot::Sender<anyhow::Result<Vec<ScopeInfo>>>,
+    },
+    /// Get variables for the active (or specified) stack frame.
+    GetVariables {
+        /// `None` uses the active frame.
+        frame_id: Option<usize>,
+        reply: oneshot::Sender<anyhow::Result<Vec<VariableInfo>>>,
+    },
+
+    // --- DAP: Execution control ---
+
+    /// Resume execution of the paused thread.
+    DapContinue {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Pause the running thread.
+    DapPause {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Step over (next line).
+    DapStepOver {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Step into a function call.
+    DapStepIn {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Step out of the current function.
+    DapStepOut {
+        reply: oneshot::Sender<anyhow::Result<()>>,
     },
 }
 
@@ -537,6 +653,108 @@ impl HelixMcpServer {
         params: Parameters<tools::lsp_extras::CompletionsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::lsp_extras::handle_completions(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Return all breakpoints, optionally filtered by file path.")]
+    async fn get_breakpoints(
+        &self,
+        params: Parameters<tools::dap::GetBreakpointsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_get_breakpoints(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Set a breakpoint at the given path and line (0-indexed). Requires user approval.")]
+    async fn set_breakpoint(
+        &self,
+        params: Parameters<tools::dap::SetBreakpointParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_set_breakpoint(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Remove the breakpoint at the given path and line (0-indexed).")]
+    async fn remove_breakpoint(
+        &self,
+        params: Parameters<tools::dap::RemoveBreakpointParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_remove_breakpoint(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get current DAP debugger session status (active, paused, thread/frame info).")]
+    async fn get_dap_status(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_get_dap_status().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get the call stack frames for the active (or specified) thread. Requires debugger to be paused.")]
+    async fn get_stack_trace(
+        &self,
+        params: Parameters<tools::dap::GetStackTraceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_get_stack_trace(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get variable scopes for the given stack frame id. Requires debugger to be paused.")]
+    async fn get_scopes(
+        &self,
+        params: Parameters<tools::dap::GetScopesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_get_scopes(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Get variables for the active (or specified) stack frame. Requires debugger to be paused.")]
+    async fn get_variables(
+        &self,
+        params: Parameters<tools::dap::GetVariablesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_get_variables(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Resume execution of the paused debugger thread.")]
+    async fn dap_continue(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_continue().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Pause the running debugger thread.")]
+    async fn dap_pause(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_pause().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Step over the current line (next line, does not step into calls).")]
+    async fn dap_step_over(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_step_over().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Step into a function call on the current line.")]
+    async fn dap_step_in(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_step_in().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Step out of the current function back to its caller.")]
+    async fn dap_step_out(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_step_out().await
             .map_err(tools::fs::to_mcp_err)
     }
 }
