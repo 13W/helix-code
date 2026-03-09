@@ -20,12 +20,30 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpService, StreamableHttpServerConfig},
 };
-use std::{net::SocketAddr, path::PathBuf, sync::{Arc, OnceLock}};
+use std::{net::SocketAddr, path::PathBuf, sync::{Arc, Mutex, OnceLock}};
 use tokio::sync::{mpsc, oneshot};
 
 // ---------------------------------------------------------------------------
 // Editor ↔ MCP command types
 // ---------------------------------------------------------------------------
+
+/// A line-based text edit (1-indexed, inclusive on both ends).
+pub struct TextEdit {
+    /// First line to replace (1-indexed, inclusive).
+    pub start_line: usize,
+    /// Last line to replace (1-indexed, inclusive).
+    /// When `end_line < start_line` the edit is a pure insertion (no lines removed).
+    pub end_line: usize,
+    /// Replacement text.  Use `""` to delete lines.
+    pub new_text: String,
+}
+
+/// Result returned by write operations.
+pub struct WriteResult {
+    pub path: PathBuf,
+    pub lines_changed: usize,
+    pub saved: bool,
+}
 
 /// Metadata about an open editor buffer.
 pub struct BufferInfo {
@@ -50,6 +68,43 @@ pub enum McpCommand {
     },
     GetOpenBuffers {
         reply: oneshot::Sender<Vec<BufferInfo>>,
+    },
+    /// Write (overwrite) a file with new content.
+    WriteFile {
+        path: PathBuf,
+        content: String,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
+    /// Apply a set of line-based edits atomically.
+    ApplyEdits {
+        path: PathBuf,
+        edits: Vec<TextEdit>,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
+    /// Insert text before `line` (1-indexed).
+    InsertText {
+        path: PathBuf,
+        /// Line number before which to insert (1-indexed).
+        line: usize,
+        text: String,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
+    /// Rename the symbol at the given position via LSP.
+    RenameSymbol {
+        path: PathBuf,
+        /// 0-indexed line number.
+        line: usize,
+        /// 0-indexed column number.
+        col: usize,
+        new_name: String,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
+    /// Show a diff and ask the user for y/n permission.
+    /// Sent internally by write command handlers; not exposed as an MCP tool.
+    RequestPermission {
+        tool_name: String,
+        diff: String,
+        reply: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     },
 }
 
@@ -148,6 +203,42 @@ impl HelixMcpServer {
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::read::handle_get_open_buffers().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Write (overwrite) a file with new content. Shows a diff and requires user approval before applying.")]
+    async fn write_file(
+        &self,
+        params: Parameters<tools::write::WriteFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_write_file(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Apply multiple line-based text edits to a file atomically. Shows a diff and requires user approval.")]
+    async fn edit_file(
+        &self,
+        params: Parameters<tools::write::EditFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_edit_file(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Insert text before a given line (1-indexed). Requires user approval.")]
+    async fn insert_text(
+        &self,
+        params: Parameters<tools::write::InsertTextParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_insert_text(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Rename a symbol at the given file position via LSP. Applies workspace-wide edits after user approval.")]
+    async fn rename_symbol(
+        &self,
+        params: Parameters<tools::write::RenameSymbolParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_rename_symbol(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 }

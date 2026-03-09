@@ -765,8 +765,30 @@ impl Application {
         false
     }
 
+    /// Generate a unified diff string between `old` and `new` content.
+    fn mcp_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+        use similar::TextDiff;
+        TextDiff::from_lines(old, new)
+            .unified_diff()
+            .header(
+                &format!("a/{}", path.display()),
+                &format!("b/{}", path.display()),
+            )
+            .to_string()
+    }
+
+    /// Read the current string content of `path` — from the open buffer if available,
+    /// otherwise from disk.  Returns an empty string for new (not-yet-existing) files.
+    fn mcp_read_content(editor: &helix_view::Editor, path: &std::path::Path) -> String {
+        if let Some(doc) = editor.document_by_path(path) {
+            doc.text().to_string()
+        } else {
+            std::fs::read_to_string(path).unwrap_or_default()
+        }
+    }
+
     async fn handle_mcp_command(&mut self, cmd: helix_mcp::McpCommand) {
-        use helix_mcp::{BufferInfo, McpCommand};
+        use helix_mcp::{BufferInfo, McpCommand, WriteResult};
         match cmd {
             McpCommand::ReadFile { path, reply } => {
                 let result = if let Some(doc) = self.editor.document_by_path(&path) {
@@ -817,6 +839,423 @@ impl Application {
                     })
                     .collect();
                 let _ = reply.send(buffers);
+            }
+
+            // ── write operations ─────────────────────────────────────────────
+
+            McpCommand::RequestPermission {
+                tool_name,
+                diff,
+                reply,
+            } => {
+                use crate::ui::PromptEvent;
+
+                // Show a truncated diff preview in the status bar.
+                let preview_len = diff.len().min(400);
+                // Find a char boundary for safe slicing.
+                let preview_len = diff
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .filter(|&i| i <= preview_len)
+                    .last()
+                    .unwrap_or(0);
+                self.editor
+                    .set_status(format!("{}\n…", &diff[..preview_len]));
+
+                let prompt = ui::Prompt::new(
+                    format!("MCP {tool_name}: apply changes? [y/N]: ").into(),
+                    None,
+                    ui::completers::none,
+                    move |_cx, input, event| {
+                        if event != PromptEvent::Validate {
+                            return;
+                        }
+                        let approved =
+                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(approved);
+                        }
+                    },
+                );
+                self.compositor.replace_or_push("mcp-permission", prompt);
+            }
+
+            McpCommand::WriteFile {
+                path,
+                content,
+                reply,
+            } => {
+                use crate::ui::PromptEvent;
+                use std::sync::Mutex;
+
+                let old = Self::mcp_read_content(&self.editor, &path);
+                let diff = Self::mcp_unified_diff(&old, &content, &path);
+                let lines_changed = diff
+                    .lines()
+                    .filter(|l| {
+                        (l.starts_with('+') || l.starts_with('-'))
+                            && !l.starts_with("+++")
+                            && !l.starts_with("---")
+                    })
+                    .count();
+
+                // Show diff preview in status.
+                let preview_len = diff.len().min(400);
+                let preview_len = diff
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .filter(|&i| i <= preview_len)
+                    .last()
+                    .unwrap_or(0);
+                self.editor.set_status(diff[..preview_len].to_string());
+
+                let reply = Arc::new(Mutex::new(Some(reply)));
+                let path2 = path.clone();
+                let content2 = content.clone();
+                let prompt = ui::Prompt::new(
+                    format!(
+                        "MCP write_file '{}': apply {lines_changed} changed line(s)? [y/N]: ",
+                        path.display()
+                    )
+                    .into(),
+                    None,
+                    ui::completers::none,
+                    move |cx, input, event| {
+                        if event != PromptEvent::Validate {
+                            return;
+                        }
+                        let approved =
+                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                        let result: anyhow::Result<WriteResult> = if approved {
+                            std::fs::write(&path2, &content2)
+                                .map_err(anyhow::Error::from)
+                                .map(|_| {
+                                    if cx.editor.document_by_path(&path2).is_some() {
+                                        Self::reload_document_by_path(cx.editor, &path2);
+                                    } else if let Err(e) = cx
+                                        .editor
+                                        .open(&path2, helix_view::editor::Action::Load)
+                                    {
+                                        log::warn!(
+                                            "MCP write_file: could not open {}: {e}",
+                                            path2.display()
+                                        );
+                                    }
+                                    WriteResult {
+                                        path: path2.clone(),
+                                        lines_changed,
+                                        saved: true,
+                                    }
+                                })
+                        } else {
+                            Err(anyhow::anyhow!("Permission denied by user"))
+                        };
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(result);
+                        }
+                    },
+                );
+                self.compositor.replace_or_push("mcp-write", prompt);
+            }
+
+            McpCommand::ApplyEdits { path, edits, reply } => {
+                use crate::ui::PromptEvent;
+                use std::sync::Mutex;
+
+                // Apply edits to the current content string to produce new content.
+                let apply_result: anyhow::Result<String> = (|| {
+                    let old = Self::mcp_read_content(&self.editor, &path);
+                    let mut lines: Vec<String> =
+                        old.lines().map(String::from).collect();
+                    // Ensure at least one line so 1-indexed arithmetic works.
+                    if lines.is_empty() {
+                        lines.push(String::new());
+                    }
+
+                    // Validate and sort edits bottom-up (highest start_line first)
+                    // to preserve line offsets during application.
+                    let mut sorted = edits;
+                    sorted.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+
+                    // Check for overlaps after sorting.
+                    for w in sorted.windows(2) {
+                        let upper = &w[0]; // higher line number (comes first after desc sort)
+                        let lower = &w[1];
+                        // upper.start_line >= lower.start_line (desc order)
+                        // overlap if lower.end_line >= upper.start_line
+                        if lower.end_line >= upper.start_line {
+                            anyhow::bail!(
+                                "overlapping edits: [{}, {}] and [{}, {}]",
+                                lower.start_line,
+                                lower.end_line,
+                                upper.start_line,
+                                upper.end_line
+                            );
+                        }
+                    }
+
+                    for edit in &sorted {
+                        let n = lines.len();
+                        // Convert 1-indexed to 0-indexed, clamped.
+                        let start = edit.start_line.saturating_sub(1).min(n);
+                        let end = if edit.end_line < edit.start_line {
+                            // Pure insertion: end < start means insert before start line.
+                            start
+                        } else {
+                            edit.end_line.min(n)
+                        };
+                        let replacement: Vec<String> = if edit.new_text.is_empty() {
+                            vec![]
+                        } else {
+                            edit.new_text.lines().map(String::from).collect()
+                        };
+                        lines.splice(start..end, replacement);
+                    }
+
+                    let mut new_content = lines.join("\n");
+                    // Preserve trailing newline if original had one.
+                    if old.ends_with('\n') && !new_content.ends_with('\n') {
+                        new_content.push('\n');
+                    }
+                    Ok(new_content)
+                })();
+
+                let new_content = match apply_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let old = Self::mcp_read_content(&self.editor, &path);
+                let diff = Self::mcp_unified_diff(&old, &new_content, &path);
+                let lines_changed = diff
+                    .lines()
+                    .filter(|l| {
+                        (l.starts_with('+') || l.starts_with('-'))
+                            && !l.starts_with("+++")
+                            && !l.starts_with("---")
+                    })
+                    .count();
+
+                let preview_len = diff.len().min(400);
+                let preview_len = diff
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .filter(|&i| i <= preview_len)
+                    .last()
+                    .unwrap_or(0);
+                self.editor.set_status(diff[..preview_len].to_string());
+
+                let reply = Arc::new(Mutex::new(Some(reply)));
+                let path2 = path.clone();
+                let content2 = new_content;
+                let prompt = ui::Prompt::new(
+                    format!(
+                        "MCP edit_file '{}': apply {lines_changed} changed line(s)? [y/N]: ",
+                        path.display()
+                    )
+                    .into(),
+                    None,
+                    ui::completers::none,
+                    move |cx, input, event| {
+                        if event != PromptEvent::Validate {
+                            return;
+                        }
+                        let approved =
+                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                        let result: anyhow::Result<WriteResult> = if approved {
+                            std::fs::write(&path2, &content2)
+                                .map_err(anyhow::Error::from)
+                                .map(|_| {
+                                    if cx.editor.document_by_path(&path2).is_some() {
+                                        Self::reload_document_by_path(cx.editor, &path2);
+                                    } else if let Err(e) = cx
+                                        .editor
+                                        .open(&path2, helix_view::editor::Action::Load)
+                                    {
+                                        log::warn!(
+                                            "MCP edit_file: could not open {}: {e}",
+                                            path2.display()
+                                        );
+                                    }
+                                    WriteResult {
+                                        path: path2.clone(),
+                                        lines_changed,
+                                        saved: true,
+                                    }
+                                })
+                        } else {
+                            Err(anyhow::anyhow!("Permission denied by user"))
+                        };
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(result);
+                        }
+                    },
+                );
+                self.compositor.replace_or_push("mcp-edit", prompt);
+            }
+
+            McpCommand::InsertText {
+                path,
+                line,
+                text,
+                reply,
+            } => {
+                use helix_mcp::TextEdit;
+                // Convert insert to a single ApplyEdits call: end_line < start_line = insertion.
+                let edits = vec![TextEdit {
+                    start_line: line,
+                    end_line: line.saturating_sub(1),
+                    new_text: text,
+                }];
+                // Re-dispatch as ApplyEdits.
+                Box::pin(self.handle_mcp_command(McpCommand::ApplyEdits {
+                    path,
+                    edits,
+                    reply,
+                }))
+                .await;
+            }
+
+            McpCommand::RenameSymbol {
+                path,
+                line,
+                col,
+                new_name,
+                reply,
+            } => {
+                use crate::ui::PromptEvent;
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+                use std::sync::Mutex;
+
+                // Ensure the document is open so LSP can operate on it.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                // Borrow doc + ls to extract all needed data, then release the borrow.
+                // rename_symbol() returns an owned future so we can hold it after the borrow ends.
+                type RenameData = (
+                    helix_lsp::OffsetEncoding,
+                    std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                Output = helix_lsp::Result<Option<helix_lsp::lsp::WorkspaceEdit>>,
+                            >,
+                        >,
+                    >,
+                );
+                let rename_data: anyhow::Result<RenameData> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::RenameSymbol)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no language server with rename support for {}",
+                                path.display()
+                            )
+                        })?;
+
+                    let offset_encoding = ls.offset_encoding();
+                    let char_idx = {
+                        let l = line.min(n_lines.saturating_sub(1));
+                        let line_start = text.line_to_char(l);
+                        let line_len = text.line(l).len_chars();
+                        line_start + col.min(line_len.saturating_sub(1))
+                    };
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let future = ls
+                        .rename_symbol(doc.identifier(), lsp_pos, new_name.clone())
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support rename"))?;
+                    Ok((offset_encoding, Box::pin(future) as _))
+                })();
+
+                let (offset_encoding, future) = match rename_data {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let workspace_edit = match block_on(future) {
+                    Ok(Some(we)) => we,
+                    Ok(None) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP returned no rename edits")));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP rename error: {e}")));
+                        return;
+                    }
+                };
+
+                // Count affected changes for the prompt summary.
+                let changes_count: usize = workspace_edit
+                    .changes
+                    .as_ref()
+                    .map(|m| m.values().map(|v| v.len()).sum())
+                    .unwrap_or(0)
+                    + workspace_edit
+                        .document_changes
+                        .as_ref()
+                        .map(|dc| match dc {
+                            helix_lsp::lsp::DocumentChanges::Edits(edits) => {
+                                edits.iter().map(|e| e.edits.len()).sum()
+                            }
+                            helix_lsp::lsp::DocumentChanges::Operations(ops) => ops.len(),
+                        })
+                        .unwrap_or(0);
+
+                let reply = Arc::new(Mutex::new(Some(reply)));
+                let prompt = ui::Prompt::new(
+                    format!(
+                        "MCP rename_symbol → '{new_name}': apply {changes_count} edit(s)? [y/N]: ",
+                    )
+                    .into(),
+                    None,
+                    ui::completers::none,
+                    move |cx, input, event| {
+                        if event != PromptEvent::Validate {
+                            return;
+                        }
+                        let approved =
+                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                        let result: anyhow::Result<WriteResult> = if approved {
+                            cx.editor
+                                .apply_workspace_edit(offset_encoding, &workspace_edit)
+                                .map(|_| WriteResult {
+                                    path: path.clone(),
+                                    lines_changed: changes_count,
+                                    saved: false,
+                                })
+                                .map_err(|e| anyhow::anyhow!("apply_workspace_edit failed: {e:?}"))
+                        } else {
+                            Err(anyhow::anyhow!("Permission denied by user"))
+                        };
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(result);
+                        }
+                    },
+                );
+                self.compositor.replace_or_push("mcp-rename", prompt);
             }
         }
     }
