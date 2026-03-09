@@ -1833,6 +1833,629 @@ impl Application {
                     body: Some(body),
                 }));
             }
+
+            McpCommand::GetCursor { reply } => {
+                use helix_view::document::Mode;
+                let (view, doc) = helix_view::current_ref!(self.editor);
+                let sel = doc.selection(view.id);
+                let text = doc.text();
+                let cursor = sel.primary().cursor(text.slice(..));
+                let line = text.char_to_line(cursor);
+                let col = cursor - text.line_to_char(line);
+                let mode = match self.editor.mode() {
+                    Mode::Normal => helix_mcp::EditorMode::Normal,
+                    Mode::Insert => helix_mcp::EditorMode::Insert,
+                    Mode::Select => helix_mcp::EditorMode::Select,
+                };
+                let _ = reply.send(helix_mcp::CursorState {
+                    path: doc.path().map(|p| p.to_owned()),
+                    line: line + 1,
+                    col: col + 1,
+                    mode,
+                    selection_count: sel.len(),
+                });
+            }
+
+            McpCommand::GetSelections { path, reply } => {
+                // Ensure document is open.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let result: anyhow::Result<Vec<helix_mcp::SelectionRange>> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let doc_id = doc.id();
+                    // Find a view showing this document.
+                    let view_id = self
+                        .editor
+                        .tree
+                        .views()
+                        .find(|(v, _)| v.doc == doc_id)
+                        .map(|(v, _)| v.id)
+                        .unwrap_or(self.editor.tree.focus);
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found"))?;
+                    let text = doc.text();
+                    let sel = doc.selection(view_id);
+                    let primary_idx = sel.primary_index();
+                    let ranges: Vec<helix_mcp::SelectionRange> = sel
+                        .iter()
+                        .enumerate()
+                        .map(|(i, range)| {
+                            let anchor = range.anchor;
+                            let head = range.head;
+                            let anchor_line = text.char_to_line(anchor);
+                            let anchor_col = anchor - text.line_to_char(anchor_line);
+                            let head_line = text.char_to_line(head);
+                            let head_col = head - text.line_to_char(head_line);
+                            let frag_start = anchor.min(head);
+                            let frag_end = anchor.max(head);
+                            let selected_text = text.slice(frag_start..frag_end).to_string();
+                            helix_mcp::SelectionRange {
+                                anchor_line,
+                                anchor_col,
+                                head_line,
+                                head_col,
+                                is_primary: i == primary_idx,
+                                text: selected_text,
+                            }
+                        })
+                        .collect();
+                    Ok(ranges)
+                })();
+                let _ = reply.send(result);
+            }
+
+            McpCommand::GetViewport { path, reply } => {
+                // Ensure document is open.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let result: anyhow::Result<helix_mcp::ViewportInfo> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let doc_id = doc.id();
+                    let (view_id, height) = self
+                        .editor
+                        .tree
+                        .views()
+                        .find(|(v, _)| v.doc == doc_id)
+                        .map(|(v, _)| (v.id, v.inner_height()))
+                        .unwrap_or_else(|| {
+                            let fv = self.editor.tree.focus;
+                            let h = self
+                                .editor
+                                .tree
+                                .views()
+                                .find(|(v, _)| v.id == fv)
+                                .map(|(v, _)| v.inner_height())
+                                .unwrap_or(24);
+                            (fv, h)
+                        });
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found"))?;
+                    let text = doc.text();
+                    let offset = doc.view_offset(view_id);
+                    let first_line = text.char_to_line(offset.anchor.min(text.len_chars()));
+                    Ok(helix_mcp::ViewportInfo {
+                        first_visible_line: first_line + 1,
+                        last_visible_line: first_line + height,
+                        height_lines: height,
+                        horizontal_offset: offset.horizontal_offset,
+                    })
+                })();
+                let _ = reply.send(result);
+            }
+
+            McpCommand::GetDiagnostics { path, reply } => {
+                fn diag_to_item(
+                    p: std::path::PathBuf,
+                    d: &helix_core::diagnostic::Diagnostic,
+                ) -> helix_mcp::DiagnosticItem {
+                    use helix_core::diagnostic::{NumberOrString, Severity};
+                    let severity = match d.severity {
+                        Some(Severity::Error) => "error",
+                        Some(Severity::Warning) => "warning",
+                        Some(Severity::Info) => "info",
+                        _ => "hint",
+                    }
+                    .to_string();
+                    let code = d.code.as_ref().map(|c| match c {
+                        NumberOrString::Number(n) => n.to_string(),
+                        NumberOrString::String(s) => s.clone(),
+                    });
+                    helix_mcp::DiagnosticItem {
+                        path: p,
+                        line: d.line,
+                        col: d.range.start,
+                        severity,
+                        message: d.message.clone(),
+                        source: d.source.clone(),
+                        code,
+                    }
+                }
+
+                let items = if let Some(p) = path {
+                    self.editor
+                        .document_by_path(&p)
+                        .map(|doc| {
+                            doc.diagnostics()
+                                .iter()
+                                .map(|d| diag_to_item(p.clone(), d))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    self.editor
+                        .documents()
+                        .flat_map(|doc| {
+                            let p = doc.path().map(|x| x.to_owned()).unwrap_or_default();
+                            doc.diagnostics()
+                                .iter()
+                                .map(move |d| diag_to_item(p.clone(), d))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect()
+                };
+                let _ = reply.send(items);
+            }
+
+            McpCommand::Hover { path, line, col, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let hover_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::Hover)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no LSP with hover support for {}", path.display())
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let l = line.min(n_lines.saturating_sub(1));
+                    let line_start = text.line_to_char(l);
+                    let line_len = text.line(l).len_chars();
+                    let char_idx = line_start + col.min(line_len.saturating_sub(1));
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let future = ls
+                        .text_document_hover(doc.identifier(), lsp_pos, None)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support hover"))?;
+                    Ok(Box::pin(future)
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                    Output = helix_lsp::Result<Option<helix_lsp::lsp::Hover>>,
+                                >,
+                            >,
+                        >)
+                })();
+
+                let future = match hover_data {
+                    Ok(f) => f,
+                    Err(e) => {
+                        // No LSP or other setup error — return Ok(None), not an error.
+                        let _ = reply.send(Ok(None));
+                        let _ = e; // suppress warning
+                        return;
+                    }
+                };
+
+                let hover_result = match block_on(future) {
+                    Ok(Some(h)) => h,
+                    Ok(None) => {
+                        let _ = reply.send(Ok(None));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP hover error: {e}")));
+                        return;
+                    }
+                };
+
+                fn marked_string_value(ms: helix_lsp::lsp::MarkedString) -> String {
+                    match ms {
+                        helix_lsp::lsp::MarkedString::String(s) => s,
+                        helix_lsp::lsp::MarkedString::LanguageString(ls) => ls.value,
+                    }
+                }
+                let text = match hover_result.contents {
+                    helix_lsp::lsp::HoverContents::Markup(m) => m.value,
+                    helix_lsp::lsp::HoverContents::Scalar(s) => marked_string_value(s),
+                    helix_lsp::lsp::HoverContents::Array(a) => a
+                        .into_iter()
+                        .map(marked_string_value)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                let _ = reply.send(Ok(Some(text)));
+            }
+
+            McpCommand::CodeActions { path, line, col, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+                use helix_lsp::lsp::{CodeActionContext, CodeActionTriggerKind};
+
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let ca_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::CodeAction)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with code-action support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let l = line.min(n_lines.saturating_sub(1));
+                    let line_start = text.line_to_char(l);
+                    let line_len = text.line(l).len_chars();
+                    let char_idx = line_start + col.min(line_len.saturating_sub(1));
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let lsp_range = helix_lsp::lsp::Range {
+                        start: lsp_pos,
+                        end: lsp_pos,
+                    };
+                    let context = CodeActionContext {
+                        diagnostics: vec![],
+                        only: None,
+                        trigger_kind: Some(CodeActionTriggerKind::INVOKED),
+                    };
+                    let future = ls
+                        .code_actions(doc.identifier(), lsp_range, context)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support code actions"))?;
+                    Ok(Box::pin(future)
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                    Output = helix_lsp::Result<
+                                        Option<Vec<helix_lsp::lsp::CodeActionOrCommand>>,
+                                    >,
+                                >,
+                            >,
+                        >)
+                })();
+
+                let future = match ca_data {
+                    Ok(f) => f,
+                    Err(_) => {
+                        let _ = reply.send(Ok(vec![]));
+                        return;
+                    }
+                };
+
+                let actions = match block_on(future) {
+                    Ok(Some(a)) => a,
+                    Ok(None) => vec![],
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP code actions error: {e}")));
+                        return;
+                    }
+                };
+
+                let items: Vec<helix_mcp::CodeActionItem> = actions
+                    .into_iter()
+                    .map(|a| match a {
+                        helix_lsp::lsp::CodeActionOrCommand::CodeAction(ca) => {
+                            helix_mcp::CodeActionItem {
+                                title: ca.title,
+                                kind: ca.kind.map(|k| k.as_str().to_string()),
+                            }
+                        }
+                        helix_lsp::lsp::CodeActionOrCommand::Command(cmd) => {
+                            helix_mcp::CodeActionItem {
+                                title: cmd.title,
+                                kind: None,
+                            }
+                        }
+                    })
+                    .collect();
+                let _ = reply.send(Ok(items));
+            }
+
+            McpCommand::InlayHints { path, start_line, end_line, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let ih_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::InlayHints)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with inlay-hints support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let text = doc.text();
+                    let n = text.len_lines();
+                    let first_char = text.line_to_char(start_line.min(n));
+                    let last_char = text.line_to_char(end_line.min(n));
+                    let lsp_range = helix_lsp::util::range_to_lsp_range(
+                        text,
+                        helix_core::Range::new(first_char, last_char),
+                        offset_encoding,
+                    );
+                    let future = ls
+                        .text_document_range_inlay_hints(doc.identifier(), lsp_range, None)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support inlay hints"))?;
+                    Ok((
+                        Box::pin(future)
+                            as std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                        Output = helix_lsp::Result<
+                                            Option<Vec<helix_lsp::lsp::InlayHint>>,
+                                        >,
+                                    >,
+                                >,
+                            >,
+                        offset_encoding,
+                    ))
+                })();
+
+                let (future, offset_encoding) = match ih_data {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let _ = reply.send(Ok(vec![]));
+                        return;
+                    }
+                };
+
+                let raw_hints = match block_on(future) {
+                    Ok(Some(h)) => h,
+                    Ok(None) => vec![],
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP inlay hints error: {e}")));
+                        return;
+                    }
+                };
+
+                let mut items: Vec<helix_mcp::InlayHintItem> = Vec::new();
+                if let Some(doc) = self.editor.document_by_path(&path) {
+                    let text = doc.text();
+                    for hint in raw_hints {
+                        let char_idx = helix_lsp::util::lsp_pos_to_pos(
+                            text,
+                            hint.position,
+                            offset_encoding,
+                        );
+                        let char_idx = match char_idx {
+                            Some(c) => c,
+                            None => continue,
+                        };
+                        let hint_line = text.char_to_line(char_idx);
+                        let hint_col = char_idx - text.line_to_char(hint_line);
+                        let label = match &hint.label {
+                            helix_lsp::lsp::InlayHintLabel::String(s) => s.clone(),
+                            helix_lsp::lsp::InlayHintLabel::LabelParts(parts) => parts
+                                .iter()
+                                .map(|p| p.value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(""),
+                        };
+                        let kind = match hint.kind {
+                            Some(helix_lsp::lsp::InlayHintKind::TYPE) => "type",
+                            Some(helix_lsp::lsp::InlayHintKind::PARAMETER) => "parameter",
+                            _ => "other",
+                        }
+                        .to_string();
+                        items.push(helix_mcp::InlayHintItem {
+                            line: hint_line,
+                            col: hint_col,
+                            label,
+                            kind,
+                        });
+                    }
+                }
+                let _ = reply.send(Ok(items));
+            }
+
+            McpCommand::Completions { path, line, col, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+                use helix_lsp::lsp::{CompletionContext, CompletionTriggerKind};
+
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let comp_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::Completion)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with completion support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let l = line.min(n_lines.saturating_sub(1));
+                    let line_start = text.line_to_char(l);
+                    let line_len = text.line(l).len_chars();
+                    let char_idx = line_start + col.min(line_len.saturating_sub(1));
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let context = CompletionContext {
+                        trigger_kind: CompletionTriggerKind::INVOKED,
+                        trigger_character: None,
+                    };
+                    let future = ls
+                        .completion(doc.identifier(), lsp_pos, None, context)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support completion"))?;
+                    Ok(Box::pin(future)
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                    Output = helix_lsp::Result<
+                                        Option<helix_lsp::lsp::CompletionResponse>,
+                                    >,
+                                >,
+                            >,
+                        >)
+                })();
+
+                let future = match comp_data {
+                    Ok(f) => f,
+                    Err(_) => {
+                        let _ = reply.send(Ok(vec![]));
+                        return;
+                    }
+                };
+
+                let comp_items = match block_on(future) {
+                    Ok(Some(helix_lsp::lsp::CompletionResponse::Array(items))) => items,
+                    Ok(Some(helix_lsp::lsp::CompletionResponse::List(list))) => list.items,
+                    Ok(None) => vec![],
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP completion error: {e}")));
+                        return;
+                    }
+                };
+
+                let items: Vec<helix_mcp::McpCompletionItem> = comp_items
+                    .into_iter()
+                    .map(|item| {
+                        use helix_lsp::lsp::CompletionItemKind;
+                        let kind = item.kind.map(|k| {
+                            match k {
+                                CompletionItemKind::TEXT => "text",
+                                CompletionItemKind::METHOD => "method",
+                                CompletionItemKind::FUNCTION => "function",
+                                CompletionItemKind::CONSTRUCTOR => "constructor",
+                                CompletionItemKind::FIELD => "field",
+                                CompletionItemKind::VARIABLE => "variable",
+                                CompletionItemKind::CLASS => "class",
+                                CompletionItemKind::INTERFACE => "interface",
+                                CompletionItemKind::MODULE => "module",
+                                CompletionItemKind::PROPERTY => "property",
+                                CompletionItemKind::UNIT => "unit",
+                                CompletionItemKind::VALUE => "value",
+                                CompletionItemKind::ENUM => "enum",
+                                CompletionItemKind::KEYWORD => "keyword",
+                                CompletionItemKind::SNIPPET => "snippet",
+                                CompletionItemKind::COLOR => "color",
+                                CompletionItemKind::FILE => "file",
+                                CompletionItemKind::REFERENCE => "reference",
+                                CompletionItemKind::FOLDER => "folder",
+                                CompletionItemKind::ENUM_MEMBER => "enum_member",
+                                CompletionItemKind::CONSTANT => "constant",
+                                CompletionItemKind::STRUCT => "struct",
+                                CompletionItemKind::EVENT => "event",
+                                CompletionItemKind::OPERATOR => "operator",
+                                CompletionItemKind::TYPE_PARAMETER => "type_parameter",
+                                _ => "unknown",
+                            }
+                            .to_string()
+                        });
+                        let insert_text = item
+                            .text_edit
+                            .as_ref()
+                            .map(|te| match te {
+                                helix_lsp::lsp::CompletionTextEdit::Edit(e) => {
+                                    e.new_text.clone()
+                                }
+                                helix_lsp::lsp::CompletionTextEdit::InsertAndReplace(e) => {
+                                    e.new_text.clone()
+                                }
+                            })
+                            .or_else(|| item.insert_text.clone());
+                        helix_mcp::McpCompletionItem {
+                            label: item.label,
+                            kind,
+                            detail: item.detail,
+                            insert_text,
+                        }
+                    })
+                    .collect();
+                let _ = reply.send(Ok(items));
+            }
         }
     }
 
