@@ -766,6 +766,21 @@ impl Application {
     }
 
     /// Generate a unified diff string between `old` and `new` content.
+    fn bp_to_info(
+        path: &std::path::Path,
+        b: &helix_view::editor::Breakpoint,
+    ) -> helix_mcp::BreakpointInfo {
+        helix_mcp::BreakpointInfo {
+            path: path.to_path_buf(),
+            line: b.line,
+            column: b.column,
+            condition: b.condition.clone(),
+            verified: b.verified,
+            id: b.id,
+            message: b.message.clone(),
+        }
+    }
+
     fn mcp_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
         use similar::TextDiff;
         TextDiff::from_lines(old, new)
@@ -2455,6 +2470,379 @@ impl Application {
                     })
                     .collect();
                 let _ = reply.send(Ok(items));
+            }
+
+            // ---------------------------------------------------------------
+            // DAP: Breakpoints
+            // ---------------------------------------------------------------
+
+            McpCommand::GetBreakpoints { path, reply } => {
+                let bps: Vec<helix_mcp::BreakpointInfo> = if let Some(ref p) = path {
+                    self.editor
+                        .breakpoints
+                        .get(p)
+                        .map(|v| v.iter().map(|b| Self::bp_to_info(p, b)).collect())
+                        .unwrap_or_default()
+                } else {
+                    self.editor
+                        .breakpoints
+                        .iter()
+                        .flat_map(|(p, v)| v.iter().map(|b| Self::bp_to_info(p, b)))
+                        .collect()
+                };
+                let _ = reply.send(bps);
+            }
+
+            McpCommand::SetBreakpoint { path, line, condition, reply } => {
+                use crate::ui::PromptEvent;
+                let path2 = path.clone();
+                let prompt = crate::ui::Prompt::new(
+                    format!(
+                        "MCP set_breakpoint '{}:{}': apply? [y/N]: ",
+                        path.display(),
+                        line
+                    )
+                    .into(),
+                    None,
+                    crate::ui::completers::none,
+                    move |cx, input, event| {
+                        if event != PromptEvent::Validate {
+                            return;
+                        }
+                        let approved = matches!(
+                            input.trim().to_ascii_lowercase().as_str(),
+                            "y" | "yes"
+                        );
+                        let result: anyhow::Result<helix_mcp::BreakpointInfo> = if approved {
+                            let bp = helix_view::editor::Breakpoint {
+                                line,
+                                condition: condition.clone(),
+                                ..Default::default()
+                            };
+                            let bps =
+                                cx.editor.breakpoints.entry(path2.clone()).or_default();
+                            bps.push(bp);
+                            let idx = bps.len() - 1;
+                            // Sync with active DAP session if one exists.
+                            if let Some(debugger) =
+                                cx.editor.debug_adapters.get_active_client_mut()
+                            {
+                                if let Err(e) = helix_view::handlers::dap::breakpoints_changed(
+                                    debugger,
+                                    path2.clone(),
+                                    bps,
+                                ) {
+                                    log::warn!("MCP set_breakpoint: DAP sync error: {e}");
+                                }
+                            }
+                            let info = Self::bp_to_info(
+                                &path2,
+                                &cx.editor.breakpoints[&path2][idx],
+                            );
+                            Ok(info)
+                        } else {
+                            Err(anyhow::anyhow!("Permission denied by user"))
+                        };
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(result);
+                        }
+                    },
+                );
+                self.compositor.replace_or_push("mcp-set-breakpoint", prompt);
+            }
+
+            McpCommand::RemoveBreakpoint { path, line, reply } => {
+                let result = if let Some(bps) = self.editor.breakpoints.get_mut(&path) {
+                    if let Some(idx) = bps.iter().position(|b| b.line == line) {
+                        bps.remove(idx);
+                        // Sync with active DAP session if one exists.
+                        if let Some(debugger) =
+                            self.editor.debug_adapters.get_active_client_mut()
+                        {
+                            let _ = helix_view::handlers::dap::breakpoints_changed(
+                                debugger,
+                                path,
+                                bps,
+                            );
+                        }
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("No breakpoint at line {line}"))
+                    }
+                } else {
+                    Err(anyhow::anyhow!("No breakpoints in that file"))
+                };
+                let _ = reply.send(result);
+            }
+
+            // ---------------------------------------------------------------
+            // DAP: State
+            // ---------------------------------------------------------------
+
+            McpCommand::GetDapStatus { reply } => {
+                let status = if let Some(dbg) =
+                    self.editor.debug_adapters.get_active_client()
+                {
+                    helix_mcp::DapStatus {
+                        active: true,
+                        paused: dbg.thread_id.is_some(),
+                        thread_id: dbg.thread_id.map(|t| {
+                        t.to_string().parse::<i64>().unwrap_or(0) as usize
+                    }),
+                        active_frame: dbg.active_frame,
+                    }
+                } else {
+                    helix_mcp::DapStatus {
+                        active: false,
+                        paused: false,
+                        thread_id: None,
+                        active_frame: None,
+                    }
+                };
+                let _ = reply.send(status);
+            }
+
+            McpCommand::GetStackTrace { thread_id, reply } => {
+                let result: anyhow::Result<Vec<helix_mcp::StackFrameInfo>> = (|| {
+                    let dbg = self
+                        .editor
+                        .debug_adapters
+                        .get_active_client()
+                        .ok_or_else(|| anyhow::anyhow!("No active debugger"))?;
+                    let tid = thread_id
+                        .and_then(|t| {
+                            serde_json::from_value(serde_json::json!(t as i64)).ok()
+                        })
+                        .or(dbg.thread_id)
+                        .ok_or_else(|| anyhow::anyhow!("No active thread"))?;
+                    let active_idx = dbg.active_frame.unwrap_or(0);
+                    let frames = dbg
+                        .stack_frames
+                        .get(&tid)
+                        .ok_or_else(|| anyhow::anyhow!("No stack frames for thread"))?;
+                    Ok(frames
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| helix_mcp::StackFrameInfo {
+                            id: f.id,
+                            name: f.name.clone(),
+                            path: f
+                                .source
+                                .as_ref()
+                                .and_then(|s| s.path.as_ref())
+                                .map(std::path::PathBuf::from),
+                            line: f.line.saturating_sub(1),
+                            col: f.column.saturating_sub(1),
+                            is_active: i == active_idx,
+                        })
+                        .collect())
+                })();
+                let _ = reply.send(result);
+            }
+
+            McpCommand::GetScopes { frame_id, reply } => {
+                let result: anyhow::Result<Vec<helix_mcp::ScopeInfo>> = async {
+                    let dbg = self
+                        .editor
+                        .debug_adapters
+                        .get_active_client()
+                        .ok_or_else(|| anyhow::anyhow!("No active debugger"))?;
+                    let scopes = dbg.scopes(frame_id).await?;
+                    Ok(scopes
+                        .into_iter()
+                        .map(|s| helix_mcp::ScopeInfo {
+                            name: s.name,
+                            variables_ref: s.variables_reference,
+                        })
+                        .collect())
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+
+            McpCommand::GetVariables { frame_id, reply } => {
+                let result: anyhow::Result<Vec<helix_mcp::VariableInfo>> = async {
+                    let dbg = self
+                        .editor
+                        .debug_adapters
+                        .get_active_client()
+                        .ok_or_else(|| anyhow::anyhow!("No active debugger"))?;
+                    let tid = dbg
+                        .thread_id
+                        .ok_or_else(|| anyhow::anyhow!("Debugger not paused"))?;
+                    let frame_idx = frame_id.or(dbg.active_frame).unwrap_or(0);
+                    let frame = dbg
+                        .stack_frames
+                        .get(&tid)
+                        .and_then(|fs| fs.get(frame_idx))
+                        .ok_or_else(|| anyhow::anyhow!("No stack frame at index {frame_idx}"))?;
+                    let fid = frame.id;
+                    let scopes = dbg.scopes(fid).await?;
+                    let mut vars: Vec<helix_mcp::VariableInfo> = Vec::new();
+                    for scope in scopes {
+                        let scope_vars = dbg.variables(scope.variables_reference).await?;
+                        for v in scope_vars {
+                            vars.push(helix_mcp::VariableInfo {
+                                name: v.name,
+                                value: v.value,
+                                type_name: v.ty,
+                                variables_ref: v.variables_reference,
+                            });
+                        }
+                    }
+                    Ok(vars)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+
+            // ---------------------------------------------------------------
+            // DAP: Execution control
+            // ---------------------------------------------------------------
+
+            McpCommand::DapContinue { reply } => {
+                let result: anyhow::Result<()> = {
+                    let fut = {
+                        let dbg = self
+                            .editor
+                            .debug_adapters
+                            .get_active_client()
+                            .ok_or_else(|| anyhow::anyhow!("No active debugger"));
+                        match dbg {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                            Ok(dbg) => match dbg.thread_id {
+                                None => {
+                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                        "Debugger not paused"
+                                    )));
+                                    return;
+                                }
+                                Some(tid) => dbg.continue_thread(tid),
+                            },
+                        }
+                    };
+                    fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapPause { reply } => {
+                let result: anyhow::Result<()> = {
+                    let fut = {
+                        let dbg = self
+                            .editor
+                            .debug_adapters
+                            .get_active_client()
+                            .ok_or_else(|| anyhow::anyhow!("No active debugger"));
+                        match dbg {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                            Ok(dbg) => match dbg.thread_id {
+                                None => {
+                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                        "Debugger not paused"
+                                    )));
+                                    return;
+                                }
+                                Some(tid) => dbg.pause(tid),
+                            },
+                        }
+                    };
+                    fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapStepOver { reply } => {
+                let result: anyhow::Result<()> = {
+                    let fut = {
+                        let dbg = self
+                            .editor
+                            .debug_adapters
+                            .get_active_client()
+                            .ok_or_else(|| anyhow::anyhow!("No active debugger"));
+                        match dbg {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                            Ok(dbg) => match dbg.thread_id {
+                                None => {
+                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                        "Debugger not paused"
+                                    )));
+                                    return;
+                                }
+                                Some(tid) => dbg.next(tid),
+                            },
+                        }
+                    };
+                    fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapStepIn { reply } => {
+                let result: anyhow::Result<()> = {
+                    let fut = {
+                        let dbg = self
+                            .editor
+                            .debug_adapters
+                            .get_active_client()
+                            .ok_or_else(|| anyhow::anyhow!("No active debugger"));
+                        match dbg {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                            Ok(dbg) => match dbg.thread_id {
+                                None => {
+                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                        "Debugger not paused"
+                                    )));
+                                    return;
+                                }
+                                Some(tid) => dbg.step_in(tid),
+                            },
+                        }
+                    };
+                    fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapStepOut { reply } => {
+                let result: anyhow::Result<()> = {
+                    let fut = {
+                        let dbg = self
+                            .editor
+                            .debug_adapters
+                            .get_active_client()
+                            .ok_or_else(|| anyhow::anyhow!("No active debugger"));
+                        match dbg {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                            Ok(dbg) => match dbg.thread_id {
+                                None => {
+                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                        "Debugger not paused"
+                                    )));
+                                    return;
+                                }
+                                Some(tid) => dbg.step_out(tid),
+                            },
+                        }
+                    };
+                    fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
             }
         }
     }
