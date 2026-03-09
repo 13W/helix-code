@@ -20,7 +20,58 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpService, StreamableHttpServerConfig},
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::{Arc, OnceLock}};
+use tokio::sync::{mpsc, oneshot};
+
+// ---------------------------------------------------------------------------
+// Editor ↔ MCP command types
+// ---------------------------------------------------------------------------
+
+/// Metadata about an open editor buffer.
+pub struct BufferInfo {
+    pub path: PathBuf,
+    pub language: Option<String>,
+    pub is_modified: bool,
+    pub line_count: usize,
+    pub lsp_servers: Vec<String>,
+}
+
+/// Commands sent from MCP tools to the editor's event loop.
+pub enum McpCommand {
+    ReadFile {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
+    ReadRange {
+        path: PathBuf,
+        start_line: usize,
+        end_line: usize,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
+    GetOpenBuffers {
+        reply: oneshot::Sender<Vec<BufferInfo>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Global editor channel (one sender, one receiver; single Application instance)
+// ---------------------------------------------------------------------------
+
+static MCP_EDITOR_TX: OnceLock<mpsc::Sender<McpCommand>> = OnceLock::new();
+
+/// Called once by `Application::new()` to wire up the editor ↔ MCP channel.
+/// Returns the `Receiver` end for Application to poll in the event loop.
+pub fn init_editor_channel() -> mpsc::Receiver<McpCommand> {
+    let (tx, rx) = mpsc::channel(64);
+    // OnceLock::set is a no-op on subsequent calls (integration test restarts etc.)
+    let _ = MCP_EDITOR_TX.set(tx);
+    rx
+}
+
+/// Returns a clone of the Sender for use by MCP tools.
+pub fn editor_tx() -> Option<mpsc::Sender<McpCommand>> {
+    MCP_EDITOR_TX.get().cloned()
+}
 
 // ---------------------------------------------------------------------------
 // MCP server handler
@@ -72,6 +123,32 @@ impl HelixMcpServer {
         let result = tools::fs::handle_search(params.0).map_err(tools::fs::to_mcp_err)?;
         let json = serde_json::to_string_pretty(&result).map_err(tools::fs::to_mcp_err)?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[rmcp::tool(description = "Read a file — from editor buffer if open (sees unsaved changes), otherwise from disk")]
+    async fn read_file(
+        &self,
+        params: Parameters<tools::read::ReadFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::read::handle_read_file(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Read a line range from a file (0-indexed, end_line inclusive). Includes line numbers in output.")]
+    async fn read_range(
+        &self,
+        params: Parameters<tools::read::ReadRangeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::read::handle_read_range(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "List all open editor buffers with path, language, modified status, line count, and LSP servers")]
+    async fn get_open_buffers(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::read::handle_get_open_buffers().await
+            .map_err(tools::fs::to_mcp_err)
     }
 }
 
