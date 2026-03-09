@@ -194,29 +194,57 @@ impl Component for AgentPanel {
             height,
         );
 
-        // Build title badges: [mode] [auto-accept] [thinking…]
+        // Build title: show model and mode from config_options, then status badges.
         let mut badges = String::new();
-        if let Some(mode) = &client.current_mode {
-            let label = match mode.as_str() {
-                "plan" | "planMode" => "plan",
-                "default" | "edit" | "editMode" => "edit",
-                "auto" | "acceptEdits" | "accept_edits" => "edit",
-                other => other,
-            };
+
+        // Model label from config_options (id = "model").
+        if let Some(label) = config_option_current_label(&client.config_options, "model") {
             badges.push_str(&format!(" [{label}]"));
         }
+
+        // Mode label: use current_mode with find_label_for_value first (so it updates
+        // immediately on CurrentModeUpdate even before config_options is refreshed),
+        // then fall back to config_option_current_label, then raw current_mode.
+        let mode_label = client
+            .current_mode
+            .as_deref()
+            .and_then(|m| find_label_for_value(&client.config_options, "mode", m))
+            .or_else(|| config_option_current_label(&client.config_options, "mode"))
+            .or_else(|| {
+                client.current_mode.as_ref().map(|m| match m.as_str() {
+                    "plan" | "planMode" => "plan".to_string(),
+                    "default" | "edit" | "editMode" => "edit".to_string(),
+                    "auto" | "acceptEdits" | "accept_edits" => "edit".to_string(),
+                    other => other.to_string(),
+                })
+            });
+        if let Some(mode) = &mode_label {
+            badges.push_str(&format!(" [{mode}]"));
+        }
+
         if client.auto_accept_edits {
             badges.push_str(" [auto-accept]");
         }
         if client.is_prompting {
             badges.push_str(" [thinking…]");
         }
-        if let Some((used, size, amount, currency)) = &client.usage {
-            badges.push_str(&format!(" [{used}/{size} ${amount:.2}{currency}]"));
-        }
         let title = format!(" {}{badges} ", client.name);
         let is_prompting = client.is_prompting;
         let has_commands = !client.available_commands.is_empty();
+
+        let usage_label = {
+            let su = &client.session_usage;
+            let has_tokens = su.input_tokens > 0 || su.output_tokens > 0;
+            let tokens_part = has_tokens.then(|| format!("↑{} ↓{}", su.output_tokens, su.input_tokens));
+            let cost_part = (su.cost_amount > 0.0 || !su.currency.is_empty())
+                .then(|| format!("${:.2}{}", su.cost_amount, su.currency));
+            match (tokens_part, cost_part) {
+                (Some(t), Some(c)) => format!(" {t} {c} "),
+                (Some(t), None)    => format!(" {t} "),
+                (None, Some(c))    => format!(" {c} "),
+                (None, None)       => String::new(),
+            }
+        };
 
         surface.clear_with(area, popup_style);
         let block = Block::bordered()
@@ -224,6 +252,12 @@ impl Component for AgentPanel {
             .border_style(popup_style);
         let inner = block.inner(area).inner(Margin::horizontal(1));
         block.render(area, surface);
+
+        if !usage_label.is_empty() {
+            let label_width = usage_label.chars().count() as u16;
+            let x = area.x + area.width.saturating_sub(label_width);
+            surface.set_string(x, area.y, &usage_label, popup_style);
+        }
 
         let mut lines = Self::build_lines(
             &client.display,
@@ -238,7 +272,7 @@ impl Component for AgentPanel {
             lines.push(Spans::from(Span::styled("...", thought_style)));
         }
 
-        let input_rows = self.input.visual_rows() as u16;
+        let input_rows = self.input.visual_rows_for(inner.width) as u16;
 
         // Reserve: 1 separator row + input_rows.
         let content_height = inner.height.saturating_sub(1 + input_rows);
@@ -258,9 +292,9 @@ impl Component for AgentPanel {
             .render(content_area, surface);
 
         // Draw horizontal separator above input field.
-        // When commands are available, show a dim "Tab: commands" hint on the right.
+        // When commands are available, show a dim "/: commands" hint on the right.
         let sep_y = inner.y + content_height;
-        let hint = if has_commands { " Tab: commands " } else { "" };
+        let hint = if has_commands { " /: commands " } else { "" };
         let hint_len = hint.chars().count();
         let sep_len = (inner.width as usize).saturating_sub(hint_len);
         let sep_str: String = "─".repeat(sep_len);
@@ -499,13 +533,21 @@ impl Component for AgentPanel {
                 EventResult::Consumed(None)
             }
 
-            // Tab: open slash-command menu if commands are available.
-            KeyCode::Tab if key.modifiers.is_empty() => {
+            // '/': open slash-command menu when input is empty and this is the first char.
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                // If there is already text in the input, treat '/' as a regular character.
+                if !self.input.text().is_empty() {
+                    self.input.insert_char('/');
+                    return EventResult::Consumed(None);
+                }
+
                 let commands = cx.editor.acp.get(self.agent_id)
                     .map(|c| c.available_commands.clone())
                     .unwrap_or_default();
 
+                // No commands available: insert '/' literally.
                 if commands.is_empty() {
+                    self.input.insert_char('/');
                     return EventResult::Consumed(None);
                 }
 
@@ -533,11 +575,34 @@ impl Component for AgentPanel {
                             client.pending_command = Some(text);
                         }
                     }
+                })
+                .with_on_close(move |compositor, cx| {
+                    // Drain the pending command and insert it directly — no
+                    // second keypress required.
+                    let pending = cx.editor.acp.get_mut(agent_id)
+                        .and_then(|c| c.pending_command.take());
+                    if let Some(text) = pending {
+                        if let Some(panel) =
+                            compositor.find_id::<AgentPanel>(AgentPanel::ID)
+                        {
+                            panel.insert_input_text(&text);
+                        }
+                    }
                 });
 
                 EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
                     compositor.push(Box::new(menu));
                 })))
+            }
+
+            // Alt+M: open model picker.
+            KeyCode::Char('m') if key.modifiers == KeyModifiers::ALT => {
+                self.open_config_option_menu(cx, "model")
+            }
+
+            // Alt+P: open mode (permission mode) picker.
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::ALT => {
+                self.open_config_option_menu(cx, "mode")
             }
 
             // Regular character insertion.
@@ -557,4 +622,144 @@ impl AgentPanel {
     fn input_cursor_line_col(&self) -> (usize, usize) {
         self.input.cursor_position()
     }
+
+    /// Insert `text` at the current cursor position in the input field.
+    /// Used by the slash-command menu's `on_close` hook to avoid a second keypress.
+    pub fn insert_input_text(&mut self, text: &str) {
+        self.input.insert_str(text);
+    }
+
+
+    /// Open a picker menu for a session config option (e.g. "model" or "mode").
+    /// On selection, calls `session_set_config_option` via a background job.
+    fn open_config_option_menu(&self, cx: &mut Context, option_id: &'static str) -> EventResult {
+        use crate::ui::{MultiMenuItem, MultiMenu, PromptEvent};
+        use helix_acp::sdk::{SessionConfigKind, SessionConfigSelectOptions};
+
+        let Some(client) = cx.editor.acp.get(self.agent_id) else {
+            return EventResult::Consumed(None);
+        };
+
+        // Find the matching config option and extract its select options.
+        let select = client.config_options.iter().find_map(|opt| {
+            if opt.id.to_string() == option_id {
+                if let SessionConfigKind::Select(sel) = &opt.kind {
+                    return Some(sel.clone());
+                }
+            }
+            None
+        });
+
+        let Some(sel) = select else {
+            cx.editor.set_error(format!("No config option '{option_id}' available"));
+            return EventResult::Consumed(None);
+        };
+
+        // Flatten Ungrouped / Grouped into a plain Vec for the menu.
+        let flat_options: Vec<helix_acp::sdk::SessionConfigSelectOption> = match &sel.options {
+            SessionConfigSelectOptions::Ungrouped(opts) => opts.clone(),
+            SessionConfigSelectOptions::Grouped(groups) => {
+                groups.iter().flat_map(|g| g.options.iter().cloned()).collect()
+            }
+            _ => vec![],
+        };
+
+        let agent_id = self.agent_id;
+        let items: Vec<MultiMenuItem> = flat_options.iter().map(|o| MultiMenuItem {
+            label: o.name.clone(),
+            sublabel: o.description.clone(),
+        }).collect();
+
+        let menu = MultiMenu::new(items, move |editor, idx, event| {
+            if event != PromptEvent::Validate {
+                return;
+            }
+            if let Some(o) = flat_options.get(idx) {
+                if let Some(client) = editor.acp.get_mut(agent_id) {
+                    client.pending_config_change =
+                        Some((option_id.to_string(), o.value.to_string()));
+                }
+            }
+        })
+        .with_on_close(move |_, cx| {
+            let change = cx.editor.acp.get_mut(agent_id)
+                .and_then(|c| c.pending_config_change.take());
+            if let Some((opt_id, value)) = change {
+                if let Some(client) = cx.editor.acp.get(agent_id) {
+                    if let Some(sid) = client.session_id.clone() {
+                        let handle = client.handle();
+                        cx.jobs.callback(async move {
+                            let _ = handle
+                                .session_set_config_option(sid, opt_id, value)
+                                .await;
+                            Ok(crate::job::Callback::Editor(Box::new(|_| {})))
+                        });
+                    }
+                }
+            }
+        });
+
+        EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+            compositor.push(Box::new(menu));
+        })))
+    }
+}
+
+
+fn config_option_current_label(
+    config_options: &[helix_acp::sdk::SessionConfigOption],
+    option_id: &str,
+) -> Option<String> {
+    use helix_acp::sdk::{SessionConfigKind, SessionConfigSelectOptions};
+    for opt in config_options {
+        if opt.id.to_string() == option_id {
+            if let SessionConfigKind::Select(sel) = &opt.kind {
+                let choices: Vec<_> = match &sel.options {
+                    SessionConfigSelectOptions::Ungrouped(opts) => opts.iter().collect(),
+                    SessionConfigSelectOptions::Grouped(groups) => {
+                        groups.iter().flat_map(|g| g.options.iter()).collect()
+                    }
+                    _ => vec![],
+                };
+                for choice in choices {
+                    if choice.value == sel.current_value {
+                        return Some(choice.name.clone());
+                    }
+                }
+                // Fallback: return the raw value id if no name found.
+                return Some(sel.current_value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Look up the display name for `value` within the Select option identified by `option_id`.
+/// Unlike `config_option_current_label`, this does not rely on the stored `current_value`.
+fn find_label_for_value(
+    config_options: &[helix_acp::sdk::SessionConfigOption],
+    option_id: &str,
+    value: &str,
+) -> Option<String> {
+    use helix_acp::sdk::{SessionConfigKind, SessionConfigSelectOptions};
+    for opt in config_options {
+        if opt.id.to_string() == option_id {
+            if let SessionConfigKind::Select(sel) = &opt.kind {
+                let choices: Vec<_> = match &sel.options {
+                    SessionConfigSelectOptions::Ungrouped(opts) => opts.iter().collect(),
+                    SessionConfigSelectOptions::Grouped(groups) => {
+                        groups.iter().flat_map(|g| g.options.iter()).collect()
+                    }
+                    _ => vec![],
+                };
+                for choice in choices {
+                    if choice.value.to_string() == value {
+                        return Some(choice.name.clone());
+                    }
+                }
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
