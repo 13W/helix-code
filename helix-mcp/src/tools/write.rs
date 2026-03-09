@@ -160,3 +160,35 @@ fn resolve_path(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     std::fs::canonicalize(&p).unwrap_or(p)
 }
+
+// ── replace_symbol ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceSymbolParams {
+    /// File path (absolute or relative to CWD)
+    pub path: String,
+    /// Symbol name-path, e.g. `"MyStruct"` or `"MyStruct/my_method"`
+    pub name_path: String,
+    /// New symbol body (full replacement, including the signature line)
+    pub body: String,
+}
+
+pub async fn handle_replace_symbol(params: ReplaceSymbolParams) -> Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow!("no editor connection"))?;
+    let path = resolve_path(&params.path);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(McpCommand::ReplaceSymbol {
+        path,
+        name_path: params.name_path,
+        body: params.body,
+        reply: reply_tx,
+    })
+    .await?;
+    let result = reply_rx.await??;
+    let json = serde_json::json!({
+        "path": result.path.to_string_lossy(),
+        "lines_changed": result.lines_changed,
+        "saved": result.saved,
+    });
+    Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+}

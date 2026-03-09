@@ -1273,6 +1273,148 @@ impl Application {
                 self.compositor.replace_or_push("mcp-rename", prompt);
             }
 
+            McpCommand::ReplaceSymbol {
+                path,
+                name_path,
+                body,
+                reply,
+            } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+                use helix_mcp::TextEdit;
+
+                // Ensure document is open.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                // Find the symbol range via LSP document_symbols (same logic as ReadSymbol).
+                let doc_sym_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with document-symbols support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let future = ls
+                        .document_symbols(doc.identifier())
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support document symbols"))?;
+                    Ok(Box::pin(future) as std::pin::Pin<Box<dyn std::future::Future<Output = helix_lsp::Result<Option<helix_lsp::lsp::DocumentSymbolResponse>>>>>)
+                })();
+
+                let future = match doc_sym_data {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let response = match block_on(future) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("no symbols found in file")));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP document_symbols error: {e}")));
+                        return;
+                    }
+                };
+
+                // Resolve name_path to a line range (0-indexed, inclusive).
+                let parts: Vec<&str> = name_path.splitn(2, '/').collect();
+                let parent_name = parts[0];
+                let child_name = parts.get(1).copied();
+
+                fn find_range(
+                    syms: Vec<helix_lsp::lsp::DocumentSymbol>,
+                    parent: &str,
+                    child: Option<&str>,
+                ) -> Option<helix_lsp::lsp::Range> {
+                    for sym in syms {
+                        if sym.name == parent {
+                            if let Some(child_name) = child {
+                                let children = sym.children.clone().unwrap_or_default();
+                                return children
+                                    .into_iter()
+                                    .find(|c| c.name == child_name)
+                                    .map(|c| c.range);
+                            } else {
+                                return Some(sym.range);
+                            }
+                        }
+                        if let Some(children) = sym.children.clone() {
+                            if let Some(found) = find_range(children, parent, child) {
+                                return Some(found);
+                            }
+                        }
+                    }
+                    None
+                }
+
+                fn find_range_flat(
+                    syms: Vec<helix_lsp::lsp::SymbolInformation>,
+                    name: &str,
+                ) -> Option<helix_lsp::lsp::Range> {
+                    syms.into_iter()
+                        .find(|s| s.name == name)
+                        .map(|s| s.location.range)
+                }
+
+                let lsp_range = match response {
+                    helix_lsp::lsp::DocumentSymbolResponse::Nested(syms) => {
+                        find_range(syms, parent_name, child_name)
+                    }
+                    helix_lsp::lsp::DocumentSymbolResponse::Flat(syms) => {
+                        let target = child_name.unwrap_or(parent_name);
+                        find_range_flat(syms, target)
+                    }
+                };
+
+                let lsp_range = match lsp_range {
+                    Some(r) => r,
+                    None => {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "symbol '{}' not found in {}",
+                            name_path,
+                            path.display()
+                        )));
+                        return;
+                    }
+                };
+
+                // Convert 0-indexed LSP range to 1-indexed TextEdit range.
+                let edits = vec![TextEdit {
+                    start_line: lsp_range.start.line as usize + 1,
+                    end_line: lsp_range.end.line as usize + 1,
+                    new_text: body,
+                }];
+
+                // Re-dispatch as ApplyEdits (handles diff preview + user approval).
+                Box::pin(self.handle_mcp_command(McpCommand::ApplyEdits {
+                    path,
+                    edits,
+                    reply,
+                }))
+                .await;
+            }
+
+
             // ── symbol read operations ────────────────────────────────────────
 
             McpCommand::GetSymbolsOverview { path, depth, reply } => {
@@ -2471,6 +2613,122 @@ impl Application {
                     .collect();
                 let _ = reply.send(Ok(items));
             }
+
+            McpCommand::SignatureHelp { path, line, col, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let sig_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::SignatureHelp)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with signature-help support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let l = line.min(n_lines.saturating_sub(1));
+                    let line_start = text.line_to_char(l);
+                    let line_len = text.line(l).len_chars();
+                    let char_idx = line_start + col.min(line_len.saturating_sub(1));
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let future = ls
+                        .text_document_signature_help(doc.identifier(), lsp_pos, None)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support signature help"))?;
+                    Ok(Box::pin(future)
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                    Output = helix_lsp::Result<
+                                        Option<helix_lsp::lsp::SignatureHelp>,
+                                    >,
+                                >,
+                            >,
+                        >)
+                })();
+
+                let future = match sig_data {
+                    Ok(f) => f,
+                    Err(_) => {
+                        // No LSP or setup error — return Ok(None), not an error.
+                        let _ = reply.send(Ok(None));
+                        return;
+                    }
+                };
+
+                let sig_result = match block_on(future) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        let _ = reply.send(Ok(None));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP signature_help error: {e}")));
+                        return;
+                    }
+                };
+
+                fn doc_to_string(doc: Option<helix_lsp::lsp::Documentation>) -> Option<String> {
+                    match doc {
+                        Some(helix_lsp::lsp::Documentation::String(s)) => Some(s),
+                        Some(helix_lsp::lsp::Documentation::MarkupContent(m)) => Some(m.value),
+                        None => None,
+                    }
+                }
+
+                fn param_label_str(label: helix_lsp::lsp::ParameterLabel) -> String {
+                    match label {
+                        helix_lsp::lsp::ParameterLabel::Simple(s) => s,
+                        helix_lsp::lsp::ParameterLabel::LabelOffsets([start, end]) => {
+                            format!("[{start},{end}]")
+                        }
+                    }
+                }
+
+                let sigs: Vec<helix_mcp::SignatureInfo> = sig_result
+                    .signatures
+                    .into_iter()
+                    .map(|s| helix_mcp::SignatureInfo {
+                        label: s.label,
+                        documentation: doc_to_string(s.documentation),
+                        parameters: s
+                            .parameters
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|p| helix_mcp::ParameterInfo {
+                                label: param_label_str(p.label),
+                                documentation: doc_to_string(p.documentation),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+
+                let _ = reply.send(Ok(Some(helix_mcp::SignatureHelpInfo {
+                    signatures: sigs,
+                    active_signature: sig_result.active_signature,
+                    active_parameter: sig_result.active_parameter,
+                })));
+            }
+
 
             // ---------------------------------------------------------------
             // DAP: Breakpoints
