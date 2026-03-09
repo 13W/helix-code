@@ -3077,8 +3077,10 @@ fn agent_auth(
         return Ok(());
     }
 
-    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .map_err(|_| anyhow::anyhow!("CLAUDE_CODE_OAUTH_TOKEN is not set"))?;
+    let token = super::read_claude_oauth_token()
+        .ok_or_else(|| anyhow::anyhow!(
+            "No Claude OAuth token found. Set CLAUDE_CODE_OAUTH_TOKEN or run `claude auth login`."
+        ))?;
 
     let agent_id = {
         let registry = &cx.editor.acp;
