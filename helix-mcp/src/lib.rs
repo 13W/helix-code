@@ -4,11 +4,13 @@
 //! allowing AI agents (e.g. Claude Code via ACP) to connect and use
 //! Helix editor tools without manual `mcp.json` configuration.
 
+mod tools;
+
 use anyhow::Result;
 use axum::{Router, extract::{Request, State}, response::IntoResponse, routing::any};
 use rmcp::{
     ServerHandler,
-    handler::server::tool::ToolRouter,
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Content, Implementation, InitializeResult,
         ProtocolVersion, ServerCapabilities,
@@ -40,6 +42,36 @@ impl HelixMcpServer {
     #[rmcp::tool(description = "Health-check — returns pong")]
     async fn ping(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         Ok(CallToolResult::success(vec![Content::text("pong")]))
+    }
+
+    #[rmcp::tool(description = "List directory contents. Returns entries with path, kind (file/dir), and size for files.")]
+    async fn list_dir(
+        &self,
+        params: Parameters<tools::fs::ListDirParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let result = tools::fs::handle_list_dir(params.0);
+        let json = serde_json::to_string_pretty(&result).map_err(tools::fs::to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[rmcp::tool(description = "Find files matching a glob pattern (respects .gitignore). Returns list of matching file paths.")]
+    async fn find_files(
+        &self,
+        params: Parameters<tools::fs::FindFilesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let result = tools::fs::handle_find_files(params.0).map_err(tools::fs::to_mcp_err)?;
+        let json = serde_json::to_string_pretty(&result).map_err(tools::fs::to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[rmcp::tool(description = "Search file contents with a regex pattern. Returns matches with line numbers and optional context lines.")]
+    async fn search(
+        &self,
+        params: Parameters<tools::fs::SearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let result = tools::fs::handle_search(params.0).map_err(tools::fs::to_mcp_err)?;
+        let json = serde_json::to_string_pretty(&result).map_err(tools::fs::to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
