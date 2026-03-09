@@ -75,6 +75,8 @@ FLAGS:
     --vsplit                       Split all given files vertically into different windows
     --hsplit                       Split all given files horizontally into different windows
     -w, --working-dir <path>       Specify an initial working directory
+    --mcp                          Start the embedded MCP HTTP server at launch
+    --mcp-port <PORT>              Bind the MCP server to a specific port (implies --mcp)
     +[N]                           Open the first given file at line number N, or the last line, if
                                    N is not specified.
 ",

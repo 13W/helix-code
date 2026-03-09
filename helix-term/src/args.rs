@@ -19,6 +19,8 @@ pub struct Args {
     pub config_file: Option<PathBuf>,
     pub files: IndexMap<PathBuf, Vec<Position>>,
     pub working_directory: Option<PathBuf>,
+    pub mcp: bool,
+    pub mcp_port: Option<u16>,
 }
 
 impl Args {
@@ -87,6 +89,17 @@ impl Args {
                     None => {
                         anyhow::bail!("--working-dir must specify an initial working directory")
                     }
+                },
+                "--mcp" => args.mcp = true,
+                "--mcp-port" => match argv.next().as_deref() {
+                    Some(port) => match port.parse::<u16>() {
+                        Ok(p) => {
+                            args.mcp = true;
+                            args.mcp_port = Some(p);
+                        }
+                        Err(_) => anyhow::bail!("--mcp-port must be a valid port number (0-65535)"),
+                    },
+                    None => anyhow::bail!("--mcp-port must specify a port number"),
                 },
                 arg if arg.starts_with("--") => {
                     anyhow::bail!("unexpected double dash argument: {}", arg)
