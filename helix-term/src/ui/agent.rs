@@ -324,12 +324,13 @@ impl Component for AgentPanel {
             self.scroll = 0;
         }
 
-        // Sync cache with display — truncate to display_len-1: the last entry is
-        // always recomputed below, so [cache_len..display_len-1] is always valid.
-        self.line_heights.truncate(display_len.saturating_sub(1));
+        // Truncate to stable entries (all except last 2).
+        // Last 2 are always recomputed: the last may be actively growing from streaming,
+        // and the second-to-last may have grown in the same render gap when a new entry
+        // was added, leaving a stale underestimate in the cache.
+        self.line_heights.truncate(display_len.saturating_sub(2));
 
-        // Add entries not yet cached (all except the last, which we always recompute).
-        for entry in &client.display[self.line_heights.len()..display_len.saturating_sub(1)] {
+        for entry in &client.display[self.line_heights.len()..display_len] {
             let h = Self::entry_height(
                 entry,
                 inner.width,
@@ -340,23 +341,6 @@ impl Component for AgentPanel {
                 done_style,
             );
             self.line_heights.push(h);
-        }
-        // Always recompute the last entry — it may be growing from streaming.
-        if display_len > 0 {
-            let last_h = Self::entry_height(
-                &client.display[display_len - 1],
-                inner.width,
-                &cx.editor.theme,
-                &cx.editor.syn_loader,
-                thought_style,
-                tool_style,
-                done_style,
-            );
-            if self.line_heights.len() < display_len {
-                self.line_heights.push(last_h);
-            } else {
-                *self.line_heights.last_mut().unwrap() = last_h;
-            }
         }
 
         let input_rows = self.input.visual_rows_for(inner.width) as u16;

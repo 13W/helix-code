@@ -340,8 +340,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
 
         "C-a" => increment,
         "C-x" => decrement,
-
         "A-g" => agent_toggle_panel,
+        "A-G" => session_picker,
     });
     let mut select = normal.clone();
     select.merge_nodes(keymap!({ "Select mode"

@@ -534,6 +534,20 @@ pub fn editor_tx() -> Option<mpsc::Sender<McpCommand>> {
     MCP_EDITOR_TX.get().cloned()
 }
 
+/// When `true`, all MCP write operations are applied immediately without prompting the user.
+static MCP_AUTO_APPROVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Enable or disable automatic approval of MCP write operations.
+pub fn set_auto_approve(val: bool) {
+    MCP_AUTO_APPROVE.store(val, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns `true` if MCP write operations should be applied without user confirmation.
+pub fn auto_approve() -> bool {
+    MCP_AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // MCP server handler
 // ---------------------------------------------------------------------------
