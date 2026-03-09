@@ -1184,6 +1184,8 @@ pub struct Editor {
     pub debug_adapters: dap::registry::Registry,
 
     pub acp: helix_acp::Registry,
+    /// Address of the embedded MCP server, set once it is started.
+    pub mcp_addr: Option<std::net::SocketAddr>,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
 
     pub syn_loader: Arc<ArcSwap<syntax::Loader>>,
@@ -1333,6 +1335,7 @@ impl Editor {
             diff_providers: DiffProviderRegistry::default(),
             debug_adapters: dap::registry::Registry::new(),
             acp: helix_acp::Registry::new(),
+            mcp_addr: None,
             breakpoints: HashMap::new(),
             syn_loader,
             theme_loader,

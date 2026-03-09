@@ -7168,11 +7168,24 @@ fn agent_toggle_panel(cx: &mut Context) {
                     let cwd = std::env::current_dir()
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    let existing_mcp_addr = cx.editor.mcp_addr;
                     cx.jobs.callback(async move {
+                        // Start the embedded MCP server on first use.
+                        let mcp_addr = if let Some(addr) = existing_mcp_addr {
+                            Some(addr)
+                        } else {
+                            match helix_mcp::run_mcp_server(None).await {
+                                Ok(addr) => Some(addr),
+                                Err(e) => {
+                                    log::warn!("helix-mcp: failed to start MCP server: {e}");
+                                    None
+                                }
+                            }
+                        };
                         let init_result = handle.initialize().await.map_err(|e| {
                             anyhow::anyhow!("ACP agent '{name}' init failed: {e}")
                         })?;
-                        let session_result = handle.session_new(cwd).await.map_err(|e| {
+                        let session_result = handle.session_new(cwd, mcp_addr).await.map_err(|e| {
                             anyhow::anyhow!("ACP agent '{name}' session failed: {e}")
                         })?;
                         let caps = init_result.capabilities;
@@ -7217,6 +7230,9 @@ fn agent_toggle_panel(cx: &mut Context) {
 
                         Ok(job::Callback::Editor(Box::new(
                             move |editor: &mut helix_view::Editor| {
+                                if editor.mcp_addr.is_none() {
+                                    editor.mcp_addr = mcp_addr;
+                                }
                                 if let Some(client) = editor.acp.get_mut(id) {
                                     client.capabilities = Some(caps);
                                     client.session_id = Some(sid.clone());
