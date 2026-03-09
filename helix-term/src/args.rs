@@ -22,6 +22,7 @@ pub struct Args {
     pub working_directory: Option<PathBuf>,
     pub mcp: bool,
     pub mcp_port: Option<u16>,
+    pub mcp_auto_approve: bool,
 }
 
 impl Args {
@@ -104,6 +105,9 @@ impl Args {
                     },
                     None => anyhow::bail!("--mcp-port must specify a port number"),
                 },
+                "--mcp-auto-approve" => {
+                    args.mcp_auto_approve = true;
+                }
                 arg if arg.starts_with("--") => {
                     anyhow::bail!("unexpected double dash argument: {}", arg)
                 }

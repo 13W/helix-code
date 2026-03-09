@@ -30,6 +30,8 @@ pub struct Registry {
     incoming_tx: UnboundedSender<(AgentId, AcpEvent)>,
     /// Unified stream of all incoming agent events.
     pub incoming: UnboundedReceiver<(AgentId, AcpEvent)>,
+    /// The AgentId currently shown in the agent panel, if any.
+    pub active_agent_id: Option<AgentId>,
 }
 
 impl Registry {
@@ -40,6 +42,7 @@ impl Registry {
             next_id: 0,
             incoming_tx,
             incoming,
+            active_agent_id: None,
         }
     }
 
