@@ -19,6 +19,7 @@ use std::path::Path;
 
 use futures_util::Future;
 mod handlers;
+pub mod session;
 
 use ignore::DirEntry;
 use url::Url;
