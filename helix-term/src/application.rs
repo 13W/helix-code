@@ -107,7 +107,8 @@ fn format_tool_input(
             .collect();
         let joined = parts.join(", ");
         let truncated = if joined.len() > 60 {
-            format!("{}…", &joined[..57])
+            let end = joined.char_indices().nth(57).map(|(i, _)| i).unwrap_or(joined.len());
+            format!("{}…", &joined[..end])
         } else {
             joined
         };
@@ -127,7 +128,8 @@ fn format_tool_input(
         if !parts.is_empty() {
             let joined = parts.join(", ");
             let truncated = if joined.len() > 60 {
-                format!("{}…", &joined[..57])
+                let end = joined.char_indices().nth(57).map(|(i, _)| i).unwrap_or(joined.len());
+                format!("{}…", &joined[..end])
             } else {
                 joined
             };
@@ -309,6 +311,25 @@ impl Application {
         .context("build signal handler")?;
 
         let mcp_rx = Some(helix_mcp::init_editor_channel());
+
+        // Start the MCP HTTP server eagerly when the --mcp flag was passed.
+        if args.mcp {
+            use std::net::SocketAddr;
+            let bind: Option<SocketAddr> = args
+                .mcp_port
+                .map(|p| SocketAddr::from(([127, 0, 0, 1], p)));
+            let handle = tokio::runtime::Handle::current();
+            match tokio::task::block_in_place(|| handle.block_on(helix_mcp::run_mcp_server(bind))) {
+                Ok(addr) => {
+                    // Print before the TUI takes over the terminal so scripts can capture it.
+                    eprintln!("helix-mcp: MCP server listening at http://{addr}/mcp");
+                    editor.mcp_addr = Some(addr);
+                }
+                Err(e) => {
+                    log::warn!("helix-mcp: failed to start MCP server: {e}");
+                }
+            }
+        }
 
         let app = Self {
             compositor,
