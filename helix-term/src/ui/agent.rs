@@ -1,6 +1,6 @@
 use helix_acp::{AgentId, DisplayLine};
 use helix_core::Position;
-use helix_view::graphics::{CursorKind, Margin, Modifier, Rect};
+use helix_view::graphics::{Color, CursorKind, Margin, Modifier, Rect};
 use tui::buffer::Buffer as Surface;
 use tui::text::{Span, Spans, Text};
 use tui::widgets::{Block, Paragraph, Widget, Wrap};
@@ -86,35 +86,52 @@ impl AgentPanel {
                         )));
                     }
                 }
-                DisplayLine::ToolCall { name, .. } => {
-                    lines.push(Spans::from(Span::styled(
-                        format!("> {name}..."),
-                        tool_style,
-                    )));
-                }
-                DisplayLine::ToolDone { status, output, .. } => {
-                    let (icon, style) = match status.as_str() {
-                        "done" | "completed" => ("✓", done_style),
-                        _ => ("✗", tool_style),
+                DisplayLine::ToolCall { name, input, .. } => {
+                    // In-progress: yellow ●
+                    let bullet_style = helix_view::theme::Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD);
+                    let label = if input.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{name}({input})")
                     };
-                    lines.push(Spans::from(Span::styled(
-                        format!("  {icon} [{status}]"),
-                        style,
-                    )));
-                    // Show up to 5 output lines, then a truncation hint.
-                    const MAX_OUTPUT_LINES: usize = 5;
-                    let total = output.len();
-                    for line in output.iter().take(MAX_OUTPUT_LINES) {
-                        lines.push(Spans::from(Span::styled(
-                            format!("  {line}"),
-                            thought_style,
-                        )));
-                    }
-                    if total > MAX_OUTPUT_LINES {
-                        lines.push(Spans::from(Span::styled(
-                            format!("  ... (+{} lines)", total - MAX_OUTPUT_LINES),
-                            thought_style,
-                        )));
+                    lines.push(Spans::from(vec![
+                        Span::styled("● ", bullet_style),
+                        Span::styled(label, tool_style),
+                    ]));
+                }
+                DisplayLine::ToolDone { name, input, status, output, .. } => {
+                    let is_success = matches!(status.as_str(), "done" | "completed");
+                    let bullet_style = if is_success {
+                        helix_view::theme::Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        helix_view::theme::Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    let label = if input.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{name}({input})")
+                    };
+                    lines.push(Spans::from(vec![
+                        Span::styled("● ", bullet_style),
+                        Span::styled(label, done_style),
+                    ]));
+                    // Show ALL output lines: first gets "  ⎿  ", rest get "     ".
+                    if output.is_empty() {
+                        lines.push(Spans::from(Span::styled("  ⎿  Done", thought_style)));
+                    } else {
+                        for (i, line) in output.iter().enumerate() {
+                            let prefix = if i == 0 { "  ⎿  " } else { "     " };
+                            lines.push(Spans::from(Span::styled(
+                                format!("{prefix}{line}"),
+                                thought_style,
+                            )));
+                        }
                     }
                 }
                 DisplayLine::PlanStep { done, description } => {
@@ -194,12 +211,17 @@ impl Component for AgentPanel {
             height,
         );
 
-        // Build title: show model and mode from config_options, then status badges.
-        let mut badges = String::new();
+        // Build title: status first, then model, then mode, then usage — all inline.
+        let mut title = format!(" {}", client.name);
+
+        // Status badge first.
+        if client.is_prompting {
+            title.push_str(" [thinking…]");
+        }
 
         // Model label from config_options (id = "model").
         if let Some(label) = config_option_current_label(&client.config_options, "model") {
-            badges.push_str(&format!(" [{label}]"));
+            title.push_str(&format!(" [{label}]"));
         }
 
         // Mode label: use current_mode with find_label_for_value first (so it updates
@@ -219,19 +241,12 @@ impl Component for AgentPanel {
                 })
             });
         if let Some(mode) = &mode_label {
-            badges.push_str(&format!(" [{mode}]"));
+            // Strip parenthetical suffix e.g. "Default (recommended)" → "Default".
+            let short = mode.split(" (").next().unwrap_or(mode);
+            title.push_str(&format!(" [{short}]"));
         }
 
-        if client.auto_accept_edits {
-            badges.push_str(" [auto-accept]");
-        }
-        if client.is_prompting {
-            badges.push_str(" [thinking…]");
-        }
-        let title = format!(" {}{badges} ", client.name);
-        let is_prompting = client.is_prompting;
-        let has_commands = !client.available_commands.is_empty();
-
+        // Usage inline in title.
         let usage_label = {
             let su = &client.session_usage;
             let has_tokens = su.input_tokens > 0 || su.output_tokens > 0;
@@ -239,12 +254,19 @@ impl Component for AgentPanel {
             let cost_part = (su.cost_amount > 0.0 || !su.currency.is_empty())
                 .then(|| format!("${:.2}{}", su.cost_amount, su.currency));
             match (tokens_part, cost_part) {
-                (Some(t), Some(c)) => format!(" {t} {c} "),
-                (Some(t), None)    => format!(" {t} "),
-                (None, Some(c))    => format!(" {c} "),
+                (Some(t), Some(c)) => format!("{t} {c}"),
+                (Some(t), None)    => t,
+                (None, Some(c))    => c,
                 (None, None)       => String::new(),
             }
         };
+        if !usage_label.is_empty() {
+            title.push_str(&format!(" [{usage_label}]"));
+        }
+        title.push(' ');
+
+        let is_prompting = client.is_prompting;
+        let has_commands = !client.available_commands.is_empty();
 
         surface.clear_with(area, popup_style);
         let block = Block::bordered()
@@ -252,12 +274,6 @@ impl Component for AgentPanel {
             .border_style(popup_style);
         let inner = block.inner(area).inner(Margin::horizontal(1));
         block.render(area, surface);
-
-        if !usage_label.is_empty() {
-            let label_width = usage_label.chars().count() as u16;
-            let x = area.x + area.width.saturating_sub(label_width);
-            surface.set_string(x, area.y, &usage_label, popup_style);
-        }
 
         let mut lines = Self::build_lines(
             &client.display,
