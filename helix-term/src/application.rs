@@ -2844,6 +2844,116 @@ impl Application {
                 };
                 let _ = reply.send(result);
             }
+
+            // --- VCS: Diff ---
+
+            McpCommand::GetDiffHunks { path, reply } => {
+                if let Some(doc) = self.editor.document_by_path(&path) {
+                    if let Some(diff_handle) = doc.diff_handle() {
+                        let diff = diff_handle.load();
+                        let head_ref = doc.version_control_head().map(|h| h.to_string());
+                        let hunks: Vec<helix_mcp::DiffHunk> = (0..diff.len())
+                            .map(|i| diff.nth_hunk(i))
+                            .map(|h| {
+                                let kind = if h.before.is_empty() {
+                                    helix_mcp::HunkKind::Added
+                                } else if h.after.is_empty() {
+                                    helix_mcp::HunkKind::Deleted
+                                } else {
+                                    helix_mcp::HunkKind::Modified
+                                };
+                                helix_mcp::DiffHunk {
+                                    kind,
+                                    before_start: h.before.start as usize,
+                                    before_end: h.before.end as usize,
+                                    after_start: h.after.start as usize,
+                                    after_end: h.after.end as usize,
+                                }
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(helix_mcp::DiffResult { path, hunks, head_ref }));
+                        return;
+                    }
+                    // File is open but has no diff handle (not tracked or no changes yet).
+                    let _ = reply.send(Ok(helix_mcp::DiffResult {
+                        path,
+                        hunks: vec![],
+                        head_ref: None,
+                    }));
+                } else {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "File not open in editor — open the file to enable diff tracking"
+                    )));
+                }
+            }
+
+            McpCommand::GetDiffBase { path, reply } => {
+                let result = self
+                    .editor
+                    .diff_providers
+                    .get_diff_base(&path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("No diff base available for: {}", path.display())
+                    });
+                let _ = reply.send(result);
+            }
+
+            // --- Registers & Jumplist ---
+
+            McpCommand::ReadRegister { name, reply } => {
+                let values: Vec<String> = self
+                    .editor
+                    .registers
+                    .read(name, &self.editor)
+                    .map(|rv| rv.map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                let _ = reply.send(Ok(values));
+            }
+
+            McpCommand::WriteRegister { name, values, reply } => {
+                if !name.is_alphabetic() && name != '+' && name != '*' {
+                    let _ = reply.send(Err(anyhow::anyhow!("Register '{}' is read-only", name)));
+                    return;
+                }
+                match self.editor.registers.write(name, values) {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("{e}")));
+                    }
+                }
+            }
+
+            McpCommand::GetJumplist { reply } => {
+                // Collect jump data first so the view borrow ends before we access
+                // editor.document() below.
+                let jump_data = {
+                    let (view, _) = helix_view::current_ref!(self.editor);
+                    view.jumps.iter().cloned().collect::<Vec<_>>()
+                };
+                let entries: Vec<helix_mcp::JumpEntry> = jump_data
+                    .iter()
+                    .filter_map(|(doc_id, selection)| {
+                        self.editor
+                            .document(*doc_id)
+                            .and_then(|doc| doc.path())
+                            .map(|path| {
+                                let doc = self.editor.document(*doc_id).unwrap();
+                                let text = doc.text().slice(..);
+                                let cursor = selection.primary().cursor(text);
+                                let line = text.char_to_line(cursor);
+                                helix_mcp::JumpEntry {
+                                    path: path.to_path_buf(),
+                                    line: line + 1,
+                                    col: 1,
+                                }
+                            })
+                    })
+                    .collect();
+                let _ = reply.send(entries);
+            }
         }
     }
 
