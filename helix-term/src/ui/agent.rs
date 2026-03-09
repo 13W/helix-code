@@ -18,10 +18,12 @@ pub struct AgentPanel {
     input: TextArea,
     /// Set during render(); used by cursor() to report screen position.
     input_area: Rect,
-    /// Cached visual-row height per DisplayLine entry, computed at `heights_width`.
+    /// Cached visual-row height per DisplayLine entry.
+    /// Computed as ceil(char_width / content_width) per span, summed — this
+    /// approximates word-wrap and must be invalidated when content_width changes.
     line_heights: Vec<usize>,
-    /// Terminal width at which `line_heights` was computed. Invalidate on change.
-    heights_width: u16,
+    /// Content width used when the cache was last built; cleared on resize.
+    last_content_width: u16,
 }
 
 impl AgentPanel {
@@ -38,38 +40,27 @@ impl AgentPanel {
             input,
             input_area: Rect::default(),
             line_heights: Vec::new(),
-            heights_width: 0,
+            last_content_width: 0,
         }
     }
 
-    /// Count the total number of visual (post-wrap) rows that `lines` would
-    /// occupy in a panel of the given `width`.
-    fn count_visual_lines(lines: &[Spans<'_>], width: u16) -> usize {
-        let w = width as usize;
-        if w == 0 {
-            return lines.len();
-        }
-        lines
-            .iter()
-            .map(|spans| {
-                let chars: usize =
-                    spans.0.iter().map(|s| s.content.chars().count()).sum();
-                if chars == 0 { 1 } else { chars.div_ceil(w) }
-            })
-            .sum()
-    }
-
-    /// Compute the visual-row height of a single DisplayLine entry at the given width.
+    /// Returns the estimated visual row height of a single DisplayLine entry
+    /// for the given panel content width.
+    ///
+    /// Each Span produced by `build_lines` may word-wrap when rendered by
+    /// `Paragraph`.  We approximate that with `ceil(char_width / content_width)`
+    /// per span so that `total_rows` reflects visual rows, not logical span
+    /// counts.  The cache must be invalidated whenever `content_width` changes.
     fn entry_height(
         entry: &DisplayLine,
-        width: u16,
+        content_width: u16,
         theme: &helix_view::Theme,
         loader: &std::sync::Arc<arc_swap::ArcSwap<helix_core::syntax::Loader>>,
         thought_style: helix_view::theme::Style,
         tool_style: helix_view::theme::Style,
         done_style: helix_view::theme::Style,
     ) -> usize {
-        let spans = Self::build_lines(
+        let lines = Self::build_lines(
             std::slice::from_ref(entry),
             theme,
             loader,
@@ -77,7 +68,18 @@ impl AgentPanel {
             tool_style,
             done_style,
         );
-        Self::count_visual_lines(&spans, width).max(1)
+        if content_width == 0 {
+            return lines.len().max(1);
+        }
+        let w = content_width as usize;
+        lines
+            .iter()
+            .map(|spans| {
+                let chars: usize = spans.0.iter().map(|s| s.content.chars().count()).sum();
+                ((chars + w - 1) / w).max(1)
+            })
+            .sum::<usize>()
+            .max(1)
     }
 
     /// Build a `Vec<Spans>` from the client's display buffer.
@@ -302,15 +304,32 @@ impl Component for AgentPanel {
         let inner = block.inner(area).inner(Margin::horizontal(1));
         block.render(area, surface);
 
-        // --- Virtual rendering: maintain per-entry height cache ---
+        // --- Virtual rendering: maintain per-entry visual-row height cache ---
+        // Heights are approximated as ceil(char_width / content_width) per span
+        // so they reflect word-wrap.  The cache is width-dependent and is cleared
+        // whenever the content area width changes (e.g. terminal resize).
 
-        // Invalidate on resize.
-        if self.heights_width != inner.width {
+        let display_len = client.display.len();
+
+        // Invalidate cache on width change so heights are recomputed for new wrap.
+        if inner.width != self.last_content_width {
             self.line_heights.clear();
-            self.heights_width = inner.width;
+            self.last_content_width = inner.width;
         }
-        // Append heights for new entries only (never recompute old ones).
-        for entry in &client.display[self.line_heights.len()..] {
+
+        // If display shrank (new session / cleared messages), reset auto-scroll
+        // so the new conversation is followed from the start.
+        if self.line_heights.len() > display_len {
+            self.pinned = true;
+            self.scroll = 0;
+        }
+
+        // Sync cache with display — truncate to display_len-1: the last entry is
+        // always recomputed below, so [cache_len..display_len-1] is always valid.
+        self.line_heights.truncate(display_len.saturating_sub(1));
+
+        // Add entries not yet cached (all except the last, which we always recompute).
+        for entry in &client.display[self.line_heights.len()..display_len.saturating_sub(1)] {
             let h = Self::entry_height(
                 entry,
                 inner.width,
@@ -321,6 +340,23 @@ impl Component for AgentPanel {
                 done_style,
             );
             self.line_heights.push(h);
+        }
+        // Always recompute the last entry — it may be growing from streaming.
+        if display_len > 0 {
+            let last_h = Self::entry_height(
+                &client.display[display_len - 1],
+                inner.width,
+                &cx.editor.theme,
+                &cx.editor.syn_loader,
+                thought_style,
+                tool_style,
+                done_style,
+            );
+            if self.line_heights.len() < display_len {
+                self.line_heights.push(last_h);
+            } else {
+                *self.line_heights.last_mut().unwrap() = last_h;
+            }
         }
 
         let input_rows = self.input.visual_rows_for(inner.width) as u16;
@@ -334,14 +370,25 @@ impl Component for AgentPanel {
         // Auto-scroll: pin to bottom while streaming (unless user scrolled up).
         if self.pinned {
             self.scroll = total_rows.saturating_sub(content_height as usize);
+        } else {
+            // Clamp to prevent scrolling past bottom (shows empty space otherwise).
+            let max_scroll = total_rows.saturating_sub(content_height as usize);
+            self.scroll = self.scroll.min(max_scroll);
+            // Restore auto-scroll when the user has scrolled back to the exact
+            // bottom of overflowing content (max_scroll > 0 guards against the
+            // trivial case where content fits in the panel and max_scroll == 0).
+            if max_scroll > 0 && self.scroll >= max_scroll {
+                self.pinned = true;
+            }
         }
 
         let win_start = self.scroll;
         let win_end = self.scroll + content_height as usize;
 
-        // Walk to find entry_start and the sub-entry scroll offset.
+        // Walk to find entry_start and the sub-entry span offset (scroll_within).
+        // scroll_within is in logical Spans, not visual rows, so it is exact.
         let mut cumulative = 0usize;
-        let mut entry_start = client.display.len(); // default: past end (empty window)
+        let mut entry_start = display_len; // default: past end (empty window)
         let mut scroll_within = 0usize;
         for (i, &h) in self.line_heights.iter().enumerate() {
             if cumulative + h > win_start {
@@ -363,18 +410,42 @@ impl Component for AgentPanel {
             }
         }
         // Add one buffer entry to avoid clipping at the bottom.
-        entry_end = (entry_end + 1).min(client.display.len());
+        entry_end = (entry_end + 1).min(display_len);
 
-        // Build spans for the visible slice only.
-        let visible = &client.display[entry_start..entry_end];
-        let mut lines = Self::build_lines(
-            visible,
-            &cx.editor.theme,
-            &cx.editor.syn_loader,
-            thought_style,
-            tool_style,
-            done_style,
-        );
+        // Build visible spans: for entry_start, skip the first `scroll_within` spans
+        // (they are above the viewport). Include all spans for subsequent entries.
+        // We skip at the span level rather than using Paragraph::scroll(), which
+        // would require our row counts to match the renderer's word-wrap exactly.
+        let first_spans = if entry_start < display_len {
+            Self::build_lines(
+                std::slice::from_ref(&client.display[entry_start]),
+                &cx.editor.theme,
+                &cx.editor.syn_loader,
+                thought_style,
+                tool_style,
+                done_style,
+            )
+        } else {
+            Vec::new()
+        };
+        let rest_start = (entry_start + 1).min(entry_end).min(display_len);
+        let rest_spans = if rest_start < entry_end.min(display_len) {
+            Self::build_lines(
+                &client.display[rest_start..entry_end.min(display_len)],
+                &cx.editor.theme,
+                &cx.editor.syn_loader,
+                thought_style,
+                tool_style,
+                done_style,
+            )
+        } else {
+            Vec::new()
+        };
+
+        let skip = scroll_within.min(first_spans.len());
+        let mut lines: Vec<Spans<'static>> = Vec::new();
+        lines.extend_from_slice(&first_spans[skip..]);
+        lines.extend(rest_spans);
 
         // Show a placeholder while the first chunk is in flight.
         if lines.is_empty() && is_prompting {
@@ -385,7 +456,6 @@ impl Component for AgentPanel {
         let text = Text::from(lines);
         Paragraph::new(&text)
             .wrap(Wrap { trim: false })
-            .scroll((scroll_within as u16, 0))
             .render(content_area, surface);
 
         // Draw horizontal separator above input field.
