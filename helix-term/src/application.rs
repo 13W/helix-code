@@ -1257,6 +1257,582 @@ impl Application {
                 );
                 self.compositor.replace_or_push("mcp-rename", prompt);
             }
+
+            // ── symbol read operations ────────────────────────────────────────
+
+            McpCommand::GetSymbolsOverview { path, depth, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                // Ensure the document is open so LSP can operate on it.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                // Borrow doc + ls, extract future, release borrow.
+                let doc_sym_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with document-symbols support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let future = ls
+                        .document_symbols(doc.identifier())
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support document symbols"))?;
+                    Ok(Box::pin(future) as std::pin::Pin<Box<dyn std::future::Future<Output = helix_lsp::Result<Option<helix_lsp::lsp::DocumentSymbolResponse>>>>>)
+                })();
+
+                let future = match doc_sym_data {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let response = match block_on(future) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        let _ = reply.send(Ok((vec![], "lsp".to_string())));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP document_symbols error: {e}")));
+                        return;
+                    }
+                };
+
+                fn lsp_kind_str(kind: helix_lsp::lsp::SymbolKind) -> &'static str {
+                    use helix_lsp::lsp::SymbolKind;
+                    match kind {
+                        SymbolKind::FILE => "file",
+                        SymbolKind::MODULE => "module",
+                        SymbolKind::NAMESPACE => "namespace",
+                        SymbolKind::PACKAGE => "package",
+                        SymbolKind::CLASS => "class",
+                        SymbolKind::METHOD => "method",
+                        SymbolKind::PROPERTY => "property",
+                        SymbolKind::FIELD => "field",
+                        SymbolKind::CONSTRUCTOR => "constructor",
+                        SymbolKind::ENUM => "enum",
+                        SymbolKind::INTERFACE => "interface",
+                        SymbolKind::FUNCTION => "function",
+                        SymbolKind::VARIABLE => "variable",
+                        SymbolKind::CONSTANT => "constant",
+                        SymbolKind::STRING => "string",
+                        SymbolKind::NUMBER => "number",
+                        SymbolKind::BOOLEAN => "boolean",
+                        SymbolKind::ARRAY => "array",
+                        SymbolKind::OBJECT => "object",
+                        SymbolKind::KEY => "key",
+                        SymbolKind::NULL => "null",
+                        SymbolKind::ENUM_MEMBER => "enum_member",
+                        SymbolKind::STRUCT => "struct",
+                        SymbolKind::EVENT => "event",
+                        SymbolKind::OPERATOR => "operator",
+                        SymbolKind::TYPE_PARAMETER => "type_parameter",
+                        _ => "unknown",
+                    }
+                }
+
+                fn nested_to_info(
+                    sym: helix_lsp::lsp::DocumentSymbol,
+                    depth_remaining: u8,
+                ) -> helix_mcp::SymbolInfo {
+                    let children = if depth_remaining > 0 {
+                        sym.children
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|c| nested_to_info(c, depth_remaining - 1))
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    helix_mcp::SymbolInfo {
+                        name: sym.name,
+                        kind: lsp_kind_str(sym.kind).to_string(),
+                        range: helix_mcp::LineRange {
+                            start_line: sym.range.start.line as usize,
+                            end_line: sym.range.end.line as usize,
+                        },
+                        children,
+                    }
+                }
+
+                let symbols: Vec<helix_mcp::SymbolInfo> = match response {
+                    helix_lsp::lsp::DocumentSymbolResponse::Nested(syms) => syms
+                        .into_iter()
+                        .map(|s| nested_to_info(s, depth))
+                        .collect(),
+                    helix_lsp::lsp::DocumentSymbolResponse::Flat(syms) => syms
+                        .into_iter()
+                        .map(|s| helix_mcp::SymbolInfo {
+                            name: s.name,
+                            kind: lsp_kind_str(s.kind).to_string(),
+                            range: helix_mcp::LineRange {
+                                start_line: s.location.range.start.line as usize,
+                                end_line: s.location.range.end.line as usize,
+                            },
+                            children: vec![],
+                        })
+                        .collect(),
+                };
+
+                let _ = reply.send(Ok((symbols, "lsp".to_string())));
+            }
+
+            McpCommand::FindSymbol { query, path, include_body, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                // Open file if path given, so we can find its LSP.
+                if let Some(ref p) = path {
+                    if self.editor.document_by_path(p).is_none() {
+                        let _ = self.editor.open(p, helix_view::editor::Action::Load);
+                    }
+                }
+
+                // Find any document with WorkspaceSymbols LSP support.
+                // Collect needed data before releasing the borrow.
+                let ws_sym_data: anyhow::Result<_> = (|| {
+                    let (doc, ls) = self.editor.documents().find_map(|doc| {
+                        doc.language_servers_with_feature(LanguageServerFeature::WorkspaceSymbols)
+                            .next()
+                            .map(|ls| (doc, ls))
+                    }).ok_or_else(|| anyhow::anyhow!("no LSP with workspace-symbols support"))?;
+                    let offset_encoding = ls.offset_encoding();
+                    let future = ls
+                        .workspace_symbols(query.clone())
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support workspace symbols"))?;
+                    let _ = doc; // suppress unused warning
+                    Ok((offset_encoding, Box::pin(future) as std::pin::Pin<Box<dyn std::future::Future<Output = helix_lsp::Result<Option<helix_lsp::lsp::WorkspaceSymbolResponse>>>>>))
+                })();
+
+                let (_offset_encoding, future) = match ws_sym_data {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let response = match block_on(future) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        let _ = reply.send(Ok(vec![]));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP workspace_symbols error: {e}")));
+                        return;
+                    }
+                };
+
+                fn lsp_sym_kind_str(kind: helix_lsp::lsp::SymbolKind) -> &'static str {
+                    use helix_lsp::lsp::SymbolKind;
+                    match kind {
+                        SymbolKind::FILE => "file",
+                        SymbolKind::MODULE => "module",
+                        SymbolKind::NAMESPACE => "namespace",
+                        SymbolKind::PACKAGE => "package",
+                        SymbolKind::CLASS => "class",
+                        SymbolKind::METHOD => "method",
+                        SymbolKind::PROPERTY => "property",
+                        SymbolKind::FIELD => "field",
+                        SymbolKind::CONSTRUCTOR => "constructor",
+                        SymbolKind::ENUM => "enum",
+                        SymbolKind::INTERFACE => "interface",
+                        SymbolKind::FUNCTION => "function",
+                        SymbolKind::VARIABLE => "variable",
+                        SymbolKind::CONSTANT => "constant",
+                        SymbolKind::STRING => "string",
+                        SymbolKind::NUMBER => "number",
+                        SymbolKind::BOOLEAN => "boolean",
+                        SymbolKind::ARRAY => "array",
+                        SymbolKind::OBJECT => "object",
+                        SymbolKind::KEY => "key",
+                        SymbolKind::NULL => "null",
+                        SymbolKind::ENUM_MEMBER => "enum_member",
+                        SymbolKind::STRUCT => "struct",
+                        SymbolKind::EVENT => "event",
+                        SymbolKind::OPERATOR => "operator",
+                        SymbolKind::TYPE_PARAMETER => "type_parameter",
+                        _ => "unknown",
+                    }
+                }
+
+                let raw_matches: Vec<(String, helix_lsp::lsp::SymbolKind, std::path::PathBuf, helix_lsp::lsp::Range)> =
+                    match response {
+                        helix_lsp::lsp::WorkspaceSymbolResponse::Flat(syms) => syms
+                            .into_iter()
+                            .filter_map(|s| {
+                                let sym_path = s.location.uri.to_file_path().ok()?;
+                                Some((s.name, s.kind, sym_path, s.location.range))
+                            })
+                            .collect(),
+                        helix_lsp::lsp::WorkspaceSymbolResponse::Nested(syms) => syms
+                            .into_iter()
+                            .filter_map(|s| {
+                                let loc = match s.location {
+                                    helix_lsp::lsp::OneOf::Left(l) => l,
+                                    helix_lsp::lsp::OneOf::Right(_) => return None,
+                                };
+                                let sym_path = loc.uri.to_file_path().ok()?;
+                                Some((s.name, s.kind, sym_path, loc.range))
+                            })
+                            .collect(),
+                    };
+
+                // Filter by path prefix if given.
+                let filtered: Vec<_> = if let Some(ref filter_path) = path {
+                    raw_matches
+                        .into_iter()
+                        .filter(|(_, _, sym_path, _)| sym_path.starts_with(filter_path))
+                        .collect()
+                } else {
+                    raw_matches
+                };
+
+                // Build SymbolMatch list, optionally reading body.
+                let mut result: Vec<helix_mcp::SymbolMatch> = Vec::new();
+                for (name, kind, sym_path, range) in filtered {
+                    let body = if include_body {
+                        let start = range.start.line as usize;
+                        let end = range.end.line as usize;
+                        let text = if let Some(doc) = self.editor.document_by_path(&sym_path) {
+                            doc.text().clone()
+                        } else if let Ok(content) = std::fs::read_to_string(&sym_path) {
+                            helix_core::Rope::from(content)
+                        } else {
+                            helix_core::Rope::new()
+                        };
+                        let n = text.len_lines();
+                        let start_char = text.line_to_char(start.min(n));
+                        let end_char = text.line_to_char((end + 1).min(n));
+                        Some(text.slice(start_char..end_char).to_string())
+                    } else {
+                        None
+                    };
+                    result.push(helix_mcp::SymbolMatch {
+                        name,
+                        kind: lsp_sym_kind_str(kind).to_string(),
+                        path: sym_path,
+                        range: helix_mcp::LineRange {
+                            start_line: range.start.line as usize,
+                            end_line: range.end.line as usize,
+                        },
+                        body,
+                    });
+                }
+
+                let _ = reply.send(Ok(result));
+            }
+
+            McpCommand::FindRefs { path, line, col, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                // Ensure the document is open.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let refs_data: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let text = doc.text();
+                    let n_lines = text.len_lines();
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::GotoReference)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with goto-reference support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let offset_encoding = ls.offset_encoding();
+                    let char_idx = {
+                        let l = line.min(n_lines.saturating_sub(1));
+                        let line_start = text.line_to_char(l);
+                        let line_len = text.line(l).len_chars();
+                        line_start + col.min(line_len.saturating_sub(1))
+                    };
+                    let lsp_pos = helix_lsp::util::pos_to_lsp_pos(text, char_idx, offset_encoding);
+                    let future = ls
+                        .goto_reference(doc.identifier(), lsp_pos, true, None)
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support goto-reference"))?;
+                    Ok(Box::pin(future) as std::pin::Pin<Box<dyn std::future::Future<Output = helix_lsp::Result<Option<Vec<helix_lsp::lsp::Location>>>>>>)
+                })();
+
+                let future = match refs_data {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let lsp_locations = match block_on(future) {
+                    Ok(Some(locs)) => locs,
+                    Ok(None) => vec![],
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP references error: {e}")));
+                        return;
+                    }
+                };
+
+                let mut ref_locations: Vec<helix_mcp::RefLocation> = Vec::new();
+                for loc in lsp_locations {
+                    let ref_path = match loc.uri.to_file_path() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let ref_line = loc.range.start.line as usize;
+                    let ref_col = loc.range.start.character as usize;
+                    let preview = {
+                        let text = if let Some(doc) = self.editor.document_by_path(&ref_path) {
+                            doc.text().clone()
+                        } else if let Ok(content) = std::fs::read_to_string(&ref_path) {
+                            helix_core::Rope::from(content)
+                        } else {
+                            helix_core::Rope::new()
+                        };
+                        let n = text.len_lines();
+                        if ref_line < n {
+                            text.line(ref_line).to_string().trim_end_matches('\n').to_string()
+                        } else {
+                            String::new()
+                        }
+                    };
+                    ref_locations.push(helix_mcp::RefLocation {
+                        path: ref_path,
+                        line: ref_line,
+                        col: ref_col,
+                        preview,
+                    });
+                }
+
+                let _ = reply.send(Ok(ref_locations));
+            }
+
+            McpCommand::ReadSymbol { path, name_path, reply } => {
+                use helix_core::syntax::config::LanguageServerFeature;
+                use helix_lsp::block_on;
+
+                // Ensure the document is open.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
+
+                let doc_sym_data2: anyhow::Result<_> = (|| {
+                    let doc = self
+                        .editor
+                        .document_by_path(&path)
+                        .ok_or_else(|| anyhow::anyhow!("document not found: {}", path.display()))?;
+                    let ls = doc
+                        .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no LSP with document-symbols support for {}",
+                                path.display()
+                            )
+                        })?;
+                    let future = ls
+                        .document_symbols(doc.identifier())
+                        .ok_or_else(|| anyhow::anyhow!("LSP does not support document symbols"))?;
+                    Ok(Box::pin(future) as std::pin::Pin<Box<dyn std::future::Future<Output = helix_lsp::Result<Option<helix_lsp::lsp::DocumentSymbolResponse>>>>>)
+                })();
+
+                let future = match doc_sym_data2 {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+
+                let response = match block_on(future) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("no symbols found in file")));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("LSP document_symbols error: {e}")));
+                        return;
+                    }
+                };
+
+                // Parse name_path: split on '/'.
+                let parts: Vec<&str> = name_path.splitn(2, '/').collect();
+                let parent_name = parts[0];
+                let child_name = parts.get(1).copied();
+
+                fn find_nested(
+                    syms: Vec<helix_lsp::lsp::DocumentSymbol>,
+                    parent: &str,
+                    child: Option<&str>,
+                ) -> Option<(helix_lsp::lsp::DocumentSymbol, Option<helix_lsp::lsp::DocumentSymbol>)> {
+                    for sym in syms {
+                        if sym.name == parent {
+                            if let Some(child_name) = child {
+                                let children = sym.children.clone().unwrap_or_default();
+                                let child_sym = children.into_iter().find(|c| c.name == child_name)?;
+                                return Some((sym, Some(child_sym)));
+                            } else {
+                                return Some((sym, None));
+                            }
+                        }
+                        // recurse into children
+                        if let Some(children) = sym.children.clone() {
+                            if let Some(found) = find_nested(children, parent, child) {
+                                return Some(found);
+                            }
+                        }
+                    }
+                    None
+                }
+
+                fn find_flat(
+                    syms: Vec<helix_lsp::lsp::SymbolInformation>,
+                    name: &str,
+                ) -> Option<helix_lsp::lsp::SymbolInformation> {
+                    syms.into_iter().find(|s| s.name == name)
+                }
+
+                let found = match response {
+                    helix_lsp::lsp::DocumentSymbolResponse::Nested(syms) => {
+                        match find_nested(syms, parent_name, child_name) {
+                            Some((parent_sym, None)) => {
+                                let range = helix_mcp::LineRange {
+                                    start_line: parent_sym.range.start.line as usize,
+                                    end_line: parent_sym.range.end.line as usize,
+                                };
+                                Some((parent_sym.name, parent_sym.kind, range))
+                            }
+                            Some((_, Some(child_sym))) => {
+                                let range = helix_mcp::LineRange {
+                                    start_line: child_sym.range.start.line as usize,
+                                    end_line: child_sym.range.end.line as usize,
+                                };
+                                Some((child_sym.name, child_sym.kind, range))
+                            }
+                            None => None,
+                        }
+                    }
+                    helix_lsp::lsp::DocumentSymbolResponse::Flat(syms) => {
+                        let target = child_name.unwrap_or(parent_name);
+                        find_flat(syms, target).map(|s| {
+                            let range = helix_mcp::LineRange {
+                                start_line: s.location.range.start.line as usize,
+                                end_line: s.location.range.end.line as usize,
+                            };
+                            (s.name, s.kind, range)
+                        })
+                    }
+                };
+
+                let (sym_name, sym_kind, sym_range) = match found {
+                    Some(t) => t,
+                    None => {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "symbol '{}' not found in {}",
+                            name_path,
+                            path.display()
+                        )));
+                        return;
+                    }
+                };
+
+                // Read the body.
+                let body = {
+                    let text = if let Some(doc) = self.editor.document_by_path(&path) {
+                        doc.text().clone()
+                    } else if let Ok(content) = std::fs::read_to_string(&path) {
+                        helix_core::Rope::from(content)
+                    } else {
+                        helix_core::Rope::new()
+                    };
+                    let n = text.len_lines();
+                    let start_char = text.line_to_char(sym_range.start_line.min(n));
+                    let end_char = text.line_to_char((sym_range.end_line + 1).min(n));
+                    text.slice(start_char..end_char).to_string()
+                };
+
+                fn kind_str2(kind: helix_lsp::lsp::SymbolKind) -> &'static str {
+                    use helix_lsp::lsp::SymbolKind;
+                    match kind {
+                        SymbolKind::FILE => "file",
+                        SymbolKind::MODULE => "module",
+                        SymbolKind::NAMESPACE => "namespace",
+                        SymbolKind::PACKAGE => "package",
+                        SymbolKind::CLASS => "class",
+                        SymbolKind::METHOD => "method",
+                        SymbolKind::PROPERTY => "property",
+                        SymbolKind::FIELD => "field",
+                        SymbolKind::CONSTRUCTOR => "constructor",
+                        SymbolKind::ENUM => "enum",
+                        SymbolKind::INTERFACE => "interface",
+                        SymbolKind::FUNCTION => "function",
+                        SymbolKind::VARIABLE => "variable",
+                        SymbolKind::CONSTANT => "constant",
+                        SymbolKind::STRING => "string",
+                        SymbolKind::NUMBER => "number",
+                        SymbolKind::BOOLEAN => "boolean",
+                        SymbolKind::ARRAY => "array",
+                        SymbolKind::OBJECT => "object",
+                        SymbolKind::KEY => "key",
+                        SymbolKind::NULL => "null",
+                        SymbolKind::ENUM_MEMBER => "enum_member",
+                        SymbolKind::STRUCT => "struct",
+                        SymbolKind::EVENT => "event",
+                        SymbolKind::OPERATOR => "operator",
+                        SymbolKind::TYPE_PARAMETER => "type_parameter",
+                        _ => "unknown",
+                    }
+                }
+
+                let _ = reply.send(Ok(helix_mcp::SymbolMatch {
+                    name: sym_name,
+                    kind: kind_str2(sym_kind).to_string(),
+                    path,
+                    range: sym_range,
+                    body: Some(body),
+                }));
+            }
         }
     }
 
