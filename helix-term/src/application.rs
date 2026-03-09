@@ -849,8 +849,15 @@ impl Application {
                     SessionUpdate::AvailableCommandsUpdate(acu) => {
                         client.available_commands = acu.available_commands;
                     }
-                    // UsageUpdate is behind an unstable feature flag — ignore.
-                    // ConfigOptionUpdate / Unknown: no visible effect in the panel.
+                    SessionUpdate::ConfigOptionUpdate(cou) => {
+                        client.config_options = cou.config_options;
+                    }
+                    SessionUpdate::UsageUpdate(uu) => {
+                        if let Some(cost) = uu.cost {
+                            client.session_usage.cost_amount = cost.amount;
+                            client.session_usage.currency = cost.currency;
+                        }
+                    }
                     _ => {}
                 }
                 helix_event::request_redraw();
@@ -1028,6 +1035,29 @@ impl Application {
             AcpEvent::Disconnected => {
                 log::info!("ACP agent {agent_id} disconnected");
                 self.editor.acp.stop_agent(agent_id);
+            }
+
+            AcpEvent::UsageUpdate { used: _, size: _, amount, currency } => {
+                if let Some(client) = self.editor.acp.get_mut(agent_id) {
+                    client.session_usage.cost_amount = amount;
+                    client.session_usage.currency = currency;
+                }
+                helix_event::request_redraw();
+            }
+
+            AcpEvent::TurnTokens { input_tokens, output_tokens } => {
+                if let Some(client) = self.editor.acp.get_mut(agent_id) {
+                    client.session_usage.input_tokens += input_tokens;
+                    client.session_usage.output_tokens += output_tokens;
+                }
+                helix_event::request_redraw();
+            }
+
+            AcpEvent::ConfigOptionsUpdate(opts) => {
+                if let Some(client) = self.editor.acp.get_mut(agent_id) {
+                    client.config_options = opts;
+                }
+                helix_event::request_redraw();
             }
         }
     }
