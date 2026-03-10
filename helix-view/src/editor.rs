@@ -722,6 +722,9 @@ pub enum StatusLineElement {
 
     /// The base of current working directory
     CurrentWorkingDirectory,
+
+    /// Indicator showing MCP trace mode is active
+    McpTraceIndicator,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs
@@ -1186,6 +1189,8 @@ pub struct Editor {
     pub acp: helix_acp::Registry,
     /// Address of the embedded MCP server, set once it is started.
     pub mcp_addr: Option<std::net::SocketAddr>,
+    /// Whether MCP trace mode is enabled: jumps cursor to edit location on write/edit.
+    pub mcp_trace: bool,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
 
     pub syn_loader: Arc<ArcSwap<syntax::Loader>>,
@@ -1336,6 +1341,7 @@ impl Editor {
             debug_adapters: dap::registry::Registry::new(),
             acp: helix_acp::Registry::new(),
             mcp_addr: None,
+            mcp_trace: false,
             breakpoints: HashMap::new(),
             syn_loader,
             theme_loader,

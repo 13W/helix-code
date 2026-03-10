@@ -621,6 +621,7 @@ impl MappableCommand {
         rotate_selections_last, "Make the last selection your primary one",
         agent_toggle_panel, "Toggle the agent panel (starts agent on first open)",
         session_picker, "Open Claude session picker (Alt+Shift+S)",
+        toggle_mcp_trace, "Toggle MCP trace mode (jump cursor to edit location on write/edit)",
     );
 }
 
@@ -7316,6 +7317,11 @@ fn agent_toggle_panel(cx: &mut Context) {
     }));
 }
 
+fn toggle_mcp_trace(cx: &mut Context) {
+    cx.editor.mcp_trace = !cx.editor.mcp_trace;
+    let state = if cx.editor.mcp_trace { "on" } else { "off" };
+    cx.editor.set_status(format!("MCP trace {state}"));
+}
 fn session_picker(cx: &mut Context) {
     let sessions = crate::session::list_sessions();
 

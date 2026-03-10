@@ -1177,6 +1177,7 @@ impl Statusline {
 pub struct Indicator {
     readonly: Option<Icon>,
     modified: Option<Icon>,
+    mcp_trace: Option<Icon>,
 }
 
 impl Indicator {
@@ -1190,5 +1191,10 @@ impl Indicator {
     #[inline]
     pub fn modified(&self) -> Icon {
         self.modified.clone().unwrap_or_else(|| Icon::from("[+]"))
+    }
+
+    #[inline]
+    pub fn mcp_trace(&self) -> Icon {
+        self.mcp_trace.clone().unwrap_or_else(|| Icon::from("[mcp]"))
     }
 }
