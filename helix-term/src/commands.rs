@@ -7287,8 +7287,15 @@ fn agent_toggle_panel(cx: &mut Context) {
         {
             // Stash the panel itself — preserves input text and scroll position.
             compositor.stashed_agent_panel = compositor.remove(crate::ui::AgentPanel::ID);
-            // Stash any active permission dialog so it can be restored on re-open.
-            compositor.stashed_permission_dialog = compositor.remove("acp-permission");
+            // Stash all active permission/confirmation dialogs so they can be restored.
+            const PERMISSION_IDS: &[&str] = &[
+                "acp-permission", "mcp-permission", "mcp-write",
+                "mcp-edit", "mcp-rename", "mcp-set-breakpoint",
+            ];
+            compositor.stashed_permission_dialogs = PERMISSION_IDS
+                .iter()
+                .filter_map(|id| compositor.remove(*id))
+                .collect();
             return;
         }
 
@@ -7307,8 +7314,9 @@ fn agent_toggle_panel(cx: &mut Context) {
                 .take()
                 .unwrap_or_else(|| Box::new(crate::ui::AgentPanel::new(id)));
             compositor.push(panel);
-            // Restore any stashed permission dialog on top of the panel.
-            if let Some(dialog) = compositor.stashed_permission_dialog.take() {
+            // Restore any stashed permission dialogs on top of the panel.
+            let dialogs: Vec<_> = compositor.stashed_permission_dialogs.drain(..).collect();
+            for dialog in dialogs {
                 compositor.push(dialog);
             }
         } else {
