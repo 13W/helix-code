@@ -13,6 +13,7 @@ use super::{menu::Item, Menu, PromptEvent, Text};
 pub struct Select<T: Item> {
     message: Text,
     options: Menu<T>,
+    id: Option<&'static str>,
 }
 
 impl<T: Item> Select<T> {
@@ -38,6 +39,7 @@ impl<T: Item> Select<T> {
         Self {
             message,
             options: menu,
+            id: None,
         }
     }
 
@@ -47,9 +49,19 @@ impl<T: Item> Select<T> {
         self.options.set_auto_close(false);
         self
     }
+
+    /// Set a compositor ID so this dialog can be found and removed by ID.
+    pub fn with_id(mut self, id: &'static str) -> Self {
+        self.id = Some(id);
+        self
+    }
 }
 
 impl<T: Item> Component for Select<T> {
+    fn id(&self) -> Option<&'static str> {
+        self.id
+    }
+
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
         self.options.handle_event(event, cx)
     }
