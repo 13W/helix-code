@@ -141,12 +141,15 @@ fn resolve_path(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     std::fs::canonicalize(&p).unwrap_or(p)
 }
-
-/// Prefix each line with its 0-indexed line number.
+/// Prefix each line with its 1-indexed line number.
+/// The `start_line` parameter is 0-indexed (matching the read_range parameter),
+/// but the output labels are 1-indexed to match `edit_file` and `insert_text`
+/// conventions — so the label shown for a line can be passed directly as
+/// `start_line` to `edit_file`.
 fn add_line_numbers(text: &str, start_line: usize) -> String {
     text.lines()
         .enumerate()
-        .map(|(i, line)| format!("{}: {}", start_line + i, line))
+        .map(|(i, line)| format!("{}: {}", start_line + i + 1, line))
         .collect::<Vec<_>>()
         .join("\n")
 }

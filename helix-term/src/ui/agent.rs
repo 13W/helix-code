@@ -292,6 +292,14 @@ impl Component for AgentPanel {
         if !usage_label.is_empty() {
             title.push_str(&format!(" [{usage_label}]"));
         }
+
+        // Context window usage: show percentage and compact used/total.
+        if client.session_usage.context_size > 0 {
+            let used = client.session_usage.context_used;
+            let size = client.session_usage.context_size;
+            let pct = (used as f64 / size as f64 * 100.0) as u64;
+            title.push_str(&format!(" [ctx {pct}% {}/{}]", fmt_tokens(used), fmt_tokens(size)));
+        }
         title.push(' ');
 
         let is_prompting = client.is_prompting;
@@ -395,11 +403,9 @@ impl Component for AgentPanel {
         }
         // Add one buffer entry to avoid clipping at the bottom.
         entry_end = (entry_end + 1).min(display_len);
-
-        // Build visible spans: for entry_start, skip the first `scroll_within` spans
-        // (they are above the viewport). Include all spans for subsequent entries.
-        // We skip at the span level rather than using Paragraph::scroll(), which
-        // would require our row counts to match the renderer's word-wrap exactly.
+        // Build visible spans: for entry_start, skip the first `scroll_within`
+        // visual rows worth of spans (they are above the viewport). Include all
+        // spans for subsequent entries.
         let first_spans = if entry_start < display_len {
             Self::build_lines(
                 std::slice::from_ref(&client.display[entry_start]),
@@ -426,7 +432,26 @@ impl Component for AgentPanel {
             Vec::new()
         };
 
-        let skip = scroll_within.min(first_spans.len());
+        // Convert scroll_within from visual rows to a span count.
+        // Each span may wrap to multiple visual rows; walk the spans
+        // accumulating their visual heights to find how many to skip.
+        let w = inner.width as usize;
+        let mut skip = 0usize;
+        let mut rows_accum = 0usize;
+        for spans in &first_spans {
+            if rows_accum >= scroll_within {
+                break;
+            }
+            let chars: usize = spans.0.iter().map(|s| s.content.chars().count()).sum();
+            let span_rows = if w > 0 { ((chars + w - 1) / w).max(1) } else { 1 };
+            if rows_accum + span_rows > scroll_within {
+                // This span straddles the boundary — show it fully
+                // rather than clipping mid-span.
+                break;
+            }
+            rows_accum += span_rows;
+            skip += 1;
+        }
         let mut lines: Vec<Spans<'static>> = Vec::new();
         lines.extend_from_slice(&first_spans[skip..]);
         lines.extend(rest_spans);
@@ -504,10 +529,23 @@ impl Component for AgentPanel {
         };
 
         match key.code {
-            // Close panel.
-            KeyCode::Esc => EventResult::Consumed(Some(Box::new(|compositor, _cx| {
-                compositor.remove(AgentPanel::ID);
-            }))),
+            // Cancel running agent (Esc).
+            KeyCode::Esc => {
+                let client = cx.editor.acp.get(self.agent_id);
+                if let Some(client) = client {
+                    if client.is_prompting {
+                        if let Some(ref session_id) = client.session_id {
+                            let session_id = session_id.clone();
+                            let handle = client.handle();
+                            let _ = handle.session_cancel(session_id);
+                        }
+                        let client = cx.editor.acp.get_mut(self.agent_id).unwrap();
+                        client.is_prompting = false;
+                        cx.editor.set_status("Agent cancelled");
+                    }
+                }
+                EventResult::Consumed(None)
+            }
 
             // Cursor left (grapheme).
             KeyCode::Left if key.modifiers.is_empty() => {
@@ -589,7 +627,6 @@ impl Component for AgentPanel {
 
             // Delete: delete next grapheme.
             KeyCode::Delete => {
-                self.input.delete_after();
                 EventResult::Consumed(None)
             }
 
@@ -614,6 +651,85 @@ impl Component for AgentPanel {
                     return EventResult::Consumed(None);
                 }
                 self.input.clear();
+
+                // Handle /exit: stop the agent subprocess and remove all agent UI.
+                if text.trim() == "/exit" {
+                    let agent_id = self.agent_id;
+                    cx.editor.acp.stop_agent(agent_id);
+                    cx.editor.set_status("Agent session ended");
+                    return EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+                        compositor.remove(AgentPanel::ID);
+                        compositor.remove("acp-permission");
+                        compositor.stashed_agent_panel = None;
+                        compositor.stashed_permission_dialog = None;
+                    })));
+                }
+
+                // Handle /clear: reset local display and scroll, then send to agent.
+                if text.trim() == "/clear" {
+                    let agent_id = self.agent_id;
+                    if let Some(client) = cx.editor.acp.get_mut(agent_id) {
+                        client.display.clear();
+                        client.session_usage = helix_acp::client::SessionUsage::default();
+                    }
+                    self.scroll = 0;
+                    self.pinned = true;
+                    self.line_heights.clear();
+
+                    // Send /clear as a prompt so the agent clears its context too.
+                    let state = cx.editor.acp.get(agent_id).and_then(|c| {
+                        c.session_id.clone().map(|sid| (sid, c.handle(), c.auto_continue.clone()))
+                    });
+                    if let Some((session_id, handle, auto_continue)) = state {
+                        if let Some(client) = cx.editor.acp.get_mut(agent_id) {
+                            client.is_prompting = true;
+                        }
+                        let prompt = vec![helix_acp::ContentBlock::Text { text }];
+                        cx.jobs.callback(async move {
+                            use crate::job::Callback;
+                            use std::sync::atomic::Ordering;
+
+                            let mut current_prompt = prompt;
+                            loop {
+                                match handle
+                                    .session_prompt(session_id.clone(), current_prompt)
+                                    .await
+                                {
+                                    Err(e) => {
+                                        return Ok(Callback::Editor(Box::new(
+                                            move |editor: &mut helix_view::Editor| {
+                                                if let Some(c) = editor.acp.get_mut(agent_id) {
+                                                    c.is_prompting = false;
+                                                }
+                                                editor.set_error(format!("Agent error: {e}"));
+                                            },
+                                        )));
+                                    }
+                                    Ok(_stop) => {
+                                        if auto_continue.swap(false, Ordering::SeqCst) {
+                                            current_prompt = vec![];
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(Callback::Editor(Box::new(
+                                move |editor: &mut helix_view::Editor| {
+                                    if let Some(c) = editor.acp.get_mut(agent_id) {
+                                        c.is_prompting = false;
+                                        // Clear display again in case the agent echoed
+                                        // back messages during the /clear handling.
+                                        c.display.clear();
+                                    }
+                                    editor.set_status("Context cleared");
+                                },
+                            )))
+                        });
+                        cx.editor.set_status("Clearing context\u{2026}");
+                    }
+                    return EventResult::Consumed(None);
+                }
 
                 let agent_id = self.agent_id;
                 let state = cx.editor.acp.get(agent_id).and_then(|client| {
@@ -677,7 +793,7 @@ impl Component for AgentPanel {
                         )))
                     });
                     self.pinned = true;
-                    cx.editor.set_status("Agent thinking…");
+                    cx.editor.set_status("Agent thinking\u{2026}");
                 } else {
                     cx.editor.set_error("Agent is still initializing");
                 }
@@ -692,50 +808,51 @@ impl Component for AgentPanel {
                     return EventResult::Consumed(None);
                 }
 
-                let commands = cx.editor.acp.get(self.agent_id)
+                // Builtin local commands, always shown regardless of agent state.
+                let builtins: &[(&str, &str)] = &[
+                    ("exit",  "End session and close panel"),
+                    ("clear", "Clear conversation context"),
+                ];
+                let builtin_count = builtins.len();
+
+                let agent_commands = cx.editor.acp.get(self.agent_id)
                     .map(|c| c.available_commands.clone())
                     .unwrap_or_default();
 
-                // No commands available: insert '/' literally.
-                if commands.is_empty() {
-                    self.input.insert_char('/');
-                    return EventResult::Consumed(None);
-                }
-
-                let agent_id = self.agent_id;
-                let items: Vec<crate::ui::MultiMenuItem> = commands
+                let mut items: Vec<crate::ui::MultiMenuItem> = builtins
                     .iter()
-                    .map(|cmd| crate::ui::MultiMenuItem {
-                        label: format!("/{}", cmd.name),
-                        sublabel: Some(cmd.description.clone()),
+                    .map(|(name, desc)| crate::ui::MultiMenuItem {
+                        label:    format!("/{name}"),
+                        sublabel: Some((*desc).to_string()),
                     })
                     .collect();
+                items.extend(agent_commands.iter().map(|cmd| crate::ui::MultiMenuItem {
+                    label:    format!("/{}", cmd.name),
+                    sublabel: Some(cmd.description.clone()),
+                }));
 
-                let menu = crate::ui::MultiMenu::new(items, move |editor, idx, event| {
+                // Side-channel: validate callback records the chosen text;
+                // on_close callback reads it and inserts into the panel input.
+                // Rc is fine here — these closures are 'static but not Send.
+                let selected = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+                let selected_for_close = selected.clone();
+
+                let menu = crate::ui::MultiMenu::new(items, move |_editor, idx, event| {
                     use crate::ui::PromptEvent;
-                    if event != PromptEvent::Validate {
-                        return;
-                    }
-                    if let Some(client) = editor.acp.get_mut(agent_id) {
-                        if let Some(cmd) = commands.get(idx) {
-                            let text = if cmd.input.is_some() {
-                                format!("/{} ", cmd.name)
-                            } else {
-                                format!("/{}", cmd.name)
-                            };
-                            client.pending_command = Some(text);
-                        }
-                    }
+                    if event != PromptEvent::Validate { return; }
+                    let text = if idx < builtin_count {
+                        Some(format!("/{}", builtins[idx].0))
+                    } else {
+                        agent_commands.get(idx - builtin_count).map(|cmd| {
+                            if cmd.input.is_some() { format!("/{} ", cmd.name) }
+                            else                   { format!("/{}", cmd.name) }
+                        })
+                    };
+                    *selected.borrow_mut() = text;
                 })
-                .with_on_close(move |compositor, cx| {
-                    // Drain the pending command and insert it directly — no
-                    // second keypress required.
-                    let pending = cx.editor.acp.get_mut(agent_id)
-                        .and_then(|c| c.pending_command.take());
-                    if let Some(text) = pending {
-                        if let Some(panel) =
-                            compositor.find_id::<AgentPanel>(AgentPanel::ID)
-                        {
+                .with_on_close(move |compositor, _cx| {
+                    if let Some(text) = selected_for_close.borrow_mut().take() {
+                        if let Some(panel) = compositor.find_id::<AgentPanel>(AgentPanel::ID) {
                             panel.insert_input_text(&text);
                         }
                     }
@@ -779,7 +896,6 @@ impl AgentPanel {
     pub fn insert_input_text(&mut self, text: &str) {
         self.input.insert_str(text);
     }
-
 
     /// Open a picker menu for a session config option (e.g. "model" or "mode").
     /// On selection, calls `session_set_config_option` via a background job.
@@ -861,7 +977,7 @@ fn config_option_current_label(
     config_options: &[helix_acp::sdk::SessionConfigOption],
     option_id: &str,
 ) -> Option<String> {
-    use helix_acp::sdk::{SessionConfigKind};
+    use helix_acp::sdk::SessionConfigKind;
     for opt in config_options {
         if opt.id.to_string() == option_id {
             if let SessionConfigKind::Select(sel) = &opt.kind {
@@ -900,4 +1016,15 @@ fn find_label_for_value(
         }
     }
     None
+}
+
+/// Format a token count in compact form: 1234 → "1.2k", 1234567 → "1.2M".
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
