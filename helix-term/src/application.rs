@@ -3516,6 +3516,8 @@ impl Application {
                             client.session_usage.cost_amount = cost.amount;
                             client.session_usage.currency = cost.currency;
                         }
+                        client.session_usage.context_used = uu.used;
+                        client.session_usage.context_size = uu.size;
                     }
                     _ => {}
                 }
@@ -3695,11 +3697,12 @@ impl Application {
                 log::info!("ACP agent {agent_id} disconnected");
                 self.editor.acp.stop_agent(agent_id);
             }
-
-            AcpEvent::UsageUpdate { used: _, size: _, amount, currency } => {
+            AcpEvent::UsageUpdate { used, size, amount, currency } => {
                 if let Some(client) = self.editor.acp.get_mut(agent_id) {
                     client.session_usage.cost_amount = amount;
                     client.session_usage.currency = currency;
+                    client.session_usage.context_used = used;
+                    client.session_usage.context_size = size;
                 }
                 helix_event::request_redraw();
             }
