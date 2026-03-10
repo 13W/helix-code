@@ -411,7 +411,7 @@ pub enum DisplayLine {
     /// Internal thought chain — rendered dimmed.
     Thought(String),
     /// Tool call started: shows tool name while in progress.
-    ToolCall { id: String, name: String, input: String },
+    ToolCall { id: String, name: String, input: String, output: Vec<String> },
     /// Tool call finished — replaces the matching `ToolCall` entry in-place.
     ToolDone { id: String, name: String, input: String, status: String, output: Vec<String> },
     /// Plan step from a `PlanUpdate`.
