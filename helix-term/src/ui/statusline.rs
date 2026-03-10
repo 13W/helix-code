@@ -158,6 +158,7 @@ where
         helix_view::editor::StatusLineElement::VersionControl => render_version_control,
         helix_view::editor::StatusLineElement::Register => render_register,
         helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
+        helix_view::editor::StatusLineElement::McpTraceIndicator => render_mcp_trace_indicator,
     }
 }
 
@@ -554,6 +555,24 @@ where
                 .ui()
                 .indicator()
                 .readonly()
+                .to_span_with(|icon| format!(" {icon} ")),
+        );
+    } else {
+        write(context, "".into());
+    }
+}
+fn render_mcp_trace_indicator<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    if context.editor.mcp_trace {
+        let icons = ICONS.load();
+        write(
+            context,
+            icons
+                .ui()
+                .indicator()
+                .mcp_trace()
                 .to_span_with(|icon| format!(" {icon} ")),
         );
     } else {
