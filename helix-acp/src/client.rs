@@ -65,7 +65,20 @@ pub enum AcpEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Internal: AgentRpcCall — messages from main thread → LocalSet actor
+// Public: ListedSession — result of a `session/list` ACP call
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Public: ListedSession — result of a `session/list` ACP call
+// ---------------------------------------------------------------------------
+
+/// A session entry returned by the ACP `session/list` extension method.
+#[derive(Debug, Clone)]
+pub struct ListedSession {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub updated_at: String,
+}
 // ---------------------------------------------------------------------------
 
 enum AgentRpcCall {
@@ -104,6 +117,10 @@ enum AgentRpcCall {
         option_id: String,
         value: String,
         reply: oneshot::Sender<Result<()>>,
+    },
+    ListSessions {
+        cwd: Option<String>,
+        reply: oneshot::Sender<Result<Vec<ListedSession>>>,
     },
 }
 
@@ -315,6 +332,29 @@ async fn rpc_actor(
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
                 }
+
+                AgentRpcCall::ListSessions { cwd, reply } => {
+                    use sdk::Agent as _;
+                    let params_json = serde_json::json!({ "cwd": cwd });
+                    let raw = serde_json::value::RawValue::from_string(params_json.to_string())
+                        .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
+                    let req = sdk::ExtRequest::new("session/list", std::sync::Arc::from(raw));
+                    let result = conn.ext_method(req).await
+                        .map(|resp| {
+                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
+                                .unwrap_or_default();
+                            v["sessions"].as_array().map(|arr| {
+                                arr.iter().filter_map(|s| Some(ListedSession {
+                                    session_id: s["sessionId"].as_str()?.to_owned(),
+                                    title: s["title"].as_str().unwrap_or("").to_owned(),
+                                    cwd: s["cwd"].as_str().unwrap_or("").to_owned(),
+                                    updated_at: s["updatedAt"].as_str().unwrap_or("").to_owned(),
+                                })).collect()
+                            }).unwrap_or_default()
+                        })
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
             }
         });
     }
@@ -436,6 +476,8 @@ pub struct SessionUsage {
     pub context_used: u64,
     /// Context window total size (from UsageUpdate).
     pub context_size: u64,
+    /// Cumulative sum of `used` from all UsageUpdate events.
+    pub total_used: u64,
 }
 
 /// An ACP agent client connected via stdio.
@@ -708,6 +750,10 @@ impl Client {
         self.handle().session_set_config_option(session_id, option_id, value).await
     }
 
+    pub async fn session_list(&self, cwd: Option<String>) -> Result<Vec<ListedSession>> {
+        self.handle().session_list(cwd).await
+    }
+
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<StopReason> {
         let session_id = self
             .session_id
@@ -825,5 +871,9 @@ impl ClientHandle {
     ) -> Result<()> {
         self.call(|reply| AgentRpcCall::SetConfigOption { session_id, option_id, value, reply })
             .await
+    }
+
+    pub async fn session_list(&self, cwd: Option<String>) -> Result<Vec<ListedSession>> {
+        self.call(|reply| AgentRpcCall::ListSessions { cwd, reply }).await
     }
 }
