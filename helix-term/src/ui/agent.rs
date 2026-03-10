@@ -18,12 +18,17 @@ pub struct AgentPanel {
     input: TextArea,
     /// Set during render(); used by cursor() to report screen position.
     input_area: Rect,
+    /// Set during render(); used by handle_event() for mouse hit-testing.
+    area: Rect,
     /// Cached visual-row height per DisplayLine entry.
     /// Computed as ceil(char_width / content_width) per span, summed — this
     /// approximates word-wrap and must be invalidated when content_width changes.
     line_heights: Vec<usize>,
-    /// Content width used when the cache was last built; cleared on resize.
     last_content_width: u16,
+    /// When true the panel fills the entire terminal viewport.
+    fullscreen: bool,
+    /// Animation start time for gradient border animation (active while is_prompting).
+    anim_start: Option<std::time::Instant>,
 }
 
 impl AgentPanel {
@@ -39,8 +44,11 @@ impl AgentPanel {
             page_height: 10,
             input,
             input_area: Rect::default(),
+            area: Rect::default(),
             line_heights: Vec::new(),
             last_content_width: 0,
+            fullscreen: false,
+            anim_start: None,
         }
     }
 
@@ -201,6 +209,49 @@ impl AgentPanel {
     }
 }
 
+/// Returns (col, row) for a step along the border perimeter (clockwise).
+/// Segments: top L→R, right T→B, bottom R→L, left B→T.
+fn border_cell_pos(area: Rect, step: usize) -> (u16, u16) {
+    let w = area.width as usize;
+    let h = area.height as usize;
+    let perimeter = 2 * w + 2 * h - 4;
+    let step = step % perimeter;
+
+    if step < w {
+        return (area.x + step as u16, area.y);
+    }
+    let step = step - w;
+    if step < h - 1 {
+        return (area.x + area.width - 1, area.y + 1 + step as u16);
+    }
+    let step = step - (h - 1);
+    if step < w - 1 {
+        return (area.x + area.width - 2 - step as u16, area.y + area.height - 1);
+    }
+    let step = step - (w - 1);
+    (area.x, area.y + area.height - 2 - step as u16)
+}
+
+/// Linear interpolation between two colors. Falls back to nearest color if
+/// either is not an RGB variant.
+fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let r = (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8;
+            let g = (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8;
+            let b = (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8;
+            Color::Rgb(r, g, b)
+        }
+        _ => {
+            if t < 0.5 {
+                from
+            } else {
+                to
+            }
+        }
+    }
+}
+
 impl Component for AgentPanel {
     fn id(&self) -> Option<&'static str> {
         Some(Self::ID)
@@ -228,17 +279,23 @@ impl Component for AgentPanel {
             .get("ui.text.info")
             .add_modifier(Modifier::DIM);
 
-        // Size: 60% width x 80% height, anchored bottom-right above statusline.
-        let width = (viewport.width * 3 / 5).max(40).min(viewport.width);
-        let height = (viewport.height * 4 / 5)
-            .max(6)
-            .min(viewport.height.saturating_sub(2));
-        let area = Rect::new(
-            viewport.width.saturating_sub(width),
-            viewport.height.saturating_sub(height + 2), // +2 for statusline
-            width,
-            height,
-        );
+        // Size: fullscreen or 60% width x 80% height anchored bottom-right.
+        let area = if self.fullscreen {
+            Rect::new(0, 0, viewport.width, viewport.height)
+        } else {
+            let width = (viewport.width * 3 / 5).max(40).min(viewport.width);
+            let height = (viewport.height * 4 / 5)
+                .max(6)
+                .min(viewport.height.saturating_sub(2));
+            Rect::new(
+                viewport.width.saturating_sub(width),
+                viewport.height.saturating_sub(height + 2), // +2 for statusline
+                width,
+                height,
+            )
+        };
+
+        self.area = area;
 
         // Build title: status first, then model, then mode, then usage — all inline.
         let mut title = format!(" {}", client.name);
@@ -275,30 +332,39 @@ impl Component for AgentPanel {
             title.push_str(&format!(" [{short}]"));
         }
 
-        // Usage inline in title.
-        let usage_label = {
+        // Combined usage: [{pct}% {ctx_used}/{ctx_size}/{total_used} {cost}{currency}]
+        {
             let su = &client.session_usage;
-            let has_tokens = su.input_tokens > 0 || su.output_tokens > 0;
-            let tokens_part = has_tokens.then(|| format!("↑{} ↓{}", su.output_tokens, su.input_tokens));
-            let cost_part = (su.cost_amount > 0.0 || !su.currency.is_empty())
-                .then(|| format!("${:.2}{}", su.cost_amount, su.currency));
-            match (tokens_part, cost_part) {
-                (Some(t), Some(c)) => format!("{t} {c}"),
-                (Some(t), None)    => t,
-                (None, Some(c))    => c,
-                (None, None)       => String::new(),
-            }
-        };
-        if !usage_label.is_empty() {
-            title.push_str(&format!(" [{usage_label}]"));
-        }
+            let has_ctx = su.context_size > 0;
+            let has_tokens = su.total_used > 0;
+            let has_cost = su.cost_amount > 0.0 || !su.currency.is_empty();
 
-        // Context window usage: show percentage and compact used/total.
-        if client.session_usage.context_size > 0 {
-            let used = client.session_usage.context_used;
-            let size = client.session_usage.context_size;
-            let pct = (used as f64 / size as f64 * 100.0) as u64;
-            title.push_str(&format!(" [ctx {pct}% {}/{}]", fmt_tokens(used), fmt_tokens(size)));
+            if has_ctx || has_tokens || has_cost {
+                let mut parts = Vec::new();
+
+                if has_ctx {
+                    let pct = (su.context_used as f64 / su.context_size as f64 * 100.0) as u64;
+                    if has_tokens {
+                        parts.push(format!(
+                            "{}% {}/{}/{}",
+                            pct,
+                            fmt_tokens(su.context_used),
+                            fmt_tokens(su.context_size),
+                            fmt_tokens(su.total_used),
+                        ));
+                    } else {
+                        parts.push(format!("{}% {}/{}", pct, fmt_tokens(su.context_used), fmt_tokens(su.context_size)));
+                    }
+                } else if has_tokens {
+                    parts.push(fmt_tokens(su.total_used));
+                }
+
+                if has_cost {
+                    parts.push(format!("{:.2}{}", su.cost_amount, su.currency));
+                }
+
+                title.push_str(&format!(" [{}]", parts.join(" ")));
+            }
         }
         title.push(' ');
 
@@ -311,6 +377,30 @@ impl Component for AgentPanel {
             .border_style(popup_style);
         let inner = block.inner(area).inner(Margin::horizontal(1));
         block.render(area, surface);
+
+        // Gradient stripe runs clockwise around the border while the agent is thinking.
+        if is_prompting {
+            let start = self.anim_start.get_or_insert_with(std::time::Instant::now);
+            let elapsed = start.elapsed().as_millis() as usize;
+            let perimeter = 2 * area.width as usize + 2 * area.height as usize - 4;
+            let head = elapsed / 80; // ~12 cells/sec
+            let trail_len = 20.min(perimeter / 2);
+            let purple = Color::Rgb(128, 0, 255);
+            let border_fg = popup_style.fg.unwrap_or(Color::White);
+
+            for i in 0..trail_len {
+                let step = (head + perimeter - i) % perimeter;
+                let t = i as f32 / trail_len as f32; // 0.0 at head (purple), 1.0 at tail (border)
+                let color = lerp_color(purple, border_fg, t);
+                let (cx, cy) = border_cell_pos(area, step);
+                if let Some(cell) = surface.get_mut(cx, cy) {
+                    cell.fg = color;
+                }
+            }
+            helix_event::request_redraw();
+        } else {
+            self.anim_start = None;
+        }
 
         // --- Virtual rendering: maintain per-entry visual-row height cache ---
         // Heights are approximated as ceil(char_width / content_width) per span
@@ -334,7 +424,6 @@ impl Component for AgentPanel {
 
         // Truncate to stable entries (all except last 2).
         // Last 2 are always recomputed: the last may be actively growing from streaming,
-        // and the second-to-last may have grown in the same render gap when a new entry
         // was added, leaving a stale underestimate in the cache.
         self.line_heights.truncate(display_len.saturating_sub(2));
 
@@ -521,6 +610,31 @@ impl Component for AgentPanel {
                 return EventResult::Consumed(None);
             }
             Event::Key(_) => {}
+            Event::Mouse(mouse_event) => {
+                use helix_view::input::MouseEventKind;
+                let x = mouse_event.column;
+                let y = mouse_event.row;
+                let within = x >= self.area.left()
+                    && x < self.area.right()
+                    && y >= self.area.top()
+                    && y < self.area.bottom();
+                if !within {
+                    return EventResult::Ignored(None);
+                }
+                return match mouse_event.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll = self.scroll.saturating_sub(3);
+                        self.pinned = false;
+                        EventResult::Consumed(None)
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll = self.scroll.saturating_add(3);
+                        self.pinned = false;
+                        EventResult::Consumed(None)
+                    }
+                    _ => EventResult::Ignored(None),
+                };
+            }
             _ => return EventResult::Ignored(None),
         }
 
@@ -871,6 +985,13 @@ impl Component for AgentPanel {
             // Alt+P: open mode (permission mode) picker.
             KeyCode::Char('p') if key.modifiers == KeyModifiers::ALT => {
                 self.open_config_option_menu(cx, "mode")
+            }
+
+            // Alt+Shift+F: toggle fullscreen.
+            KeyCode::Char('F') if key.modifiers == KeyModifiers::ALT
+                || key.modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+                self.fullscreen = !self.fullscreen;
+                EventResult::Consumed(None)
             }
 
             // Regular character insertion.

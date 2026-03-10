@@ -7142,14 +7142,9 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
         cx.editor.set_error("No enabled agent configured");
         return;
     };
-    let mut args = agent_cfg.args.clone();
-    if let Some(ref id) = resume_id {
-        args.push("--resume".to_string());
-        args.push(id.clone());
-    }
     let config = helix_acp::client::AgentConfig {
         command: agent_cfg.command.clone(),
-        args,
+        args: agent_cfg.args.clone(),
         env: agent_cfg.environment.clone(),
     };
     let name = agent_cfg.name.clone();
@@ -7157,24 +7152,6 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
     match cx.editor.acp.start_agent(&config) {
         Ok(agent_id) => {
             log::info!("ACP: started agent '{name}' ({agent_id})");
-
-            // Pre-populate history from JSONL when resuming an existing session.
-            if let Some(ref id) = resume_id {
-                let history = crate::session::load_history(id);
-                if !history.is_empty() {
-                    if let Some(client) = cx.editor.acp.get_mut(agent_id) {
-                        client.display = history;
-                    }
-                }
-            }
-
-            // Store the resume_id so the session picker can match this agent
-            // to its JSONL entry even before session_new() completes.
-            if let Some(ref id) = resume_id {
-                if let Some(client) = cx.editor.acp.get_mut(agent_id) {
-                    client.resume_session_id = Some(id.clone());
-                }
-            }
 
             // Track which agent is currently shown in the panel.
             cx.editor.acp.active_agent_id = Some(agent_id);
@@ -7195,7 +7172,7 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                 )))
             });
 
-            // Async init: start the MCP server, initialize the agent, create a session.
+            // Async init: start the MCP server, initialize the agent, create or resume a session.
             cx.jobs.callback(async move {
                 // Start the embedded MCP server on first use.
                 let mcp_addr = if let Some(addr) = existing_mcp_addr {
@@ -7212,14 +7189,10 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                 let init_result = handle.initialize().await.map_err(|e| {
                     anyhow::anyhow!("ACP agent '{name}' init failed: {e}")
                 })?;
-                let session_result = handle.session_new(cwd, mcp_addr).await.map_err(|e| {
-                    anyhow::anyhow!("ACP agent '{name}' session failed: {e}")
-                })?;
                 let caps = init_result.capabilities;
                 let auth_methods = init_result.auth_methods;
-                let sid = session_result.session_id;
-                let config_options = session_result.config_options;
 
+                // Authenticate before creating/loading the session.
                 if !auth_methods.is_empty() {
                     let has_claude_login =
                         auth_methods.iter().any(|m| m.id == "claude-login");
@@ -7254,6 +7227,19 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                         }
                     }
                 }
+
+                // Use load_session for resume, session_new for a fresh session.
+                let (sid, config_options) = if let Some(ref id) = resume_id {
+                    handle.session_load(id.clone()).await.map_err(|e| {
+                        anyhow::anyhow!("ACP agent '{name}' session load failed: {e}")
+                    })?;
+                    (id.clone(), vec![])
+                } else {
+                    let result = handle.session_new(cwd, mcp_addr).await.map_err(|e| {
+                        anyhow::anyhow!("ACP agent '{name}' session failed: {e}")
+                    })?;
+                    (result.session_id, result.config_options)
+                };
 
                 Ok(job::Callback::Editor(Box::new(
                     move |editor: &mut helix_view::Editor| {
@@ -7332,93 +7318,249 @@ fn toggle_mcp_trace(cx: &mut Context) {
     cx.editor.set_status(format!("MCP trace {state}"));
 }
 fn session_picker(cx: &mut Context) {
-    let sessions = crate::session::list_sessions();
+    // Load agent config.
+    let loader = cx.editor.syn_loader.load_full();
+    let Some(agent_cfg) = loader.agent_configurations().iter().find(|c| c.enabled) else {
+        cx.editor.set_error("No enabled agent configured");
+        return;
+    };
+    let config = helix_acp::client::AgentConfig {
+        command: agent_cfg.command.clone(),
+        args: agent_cfg.args.clone(),
+        env: agent_cfg.environment.clone(),
+    };
+    let name = agent_cfg.name.clone();
+    drop(loader);
 
+    // Start a fresh agent — it will be reused for the chosen session.
+    let agent_id = match cx.editor.acp.start_agent(&config) {
+        Ok(id) => id,
+        Err(e) => {
+            cx.editor.set_error(format!("ACP: failed to start agent: {e}"));
+            return;
+        }
+    };
+
+    let handle = cx.editor.acp.get(agent_id).unwrap().handle();
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing_mcp_addr = cx.editor.mcp_addr;
+
+    // Snapshot running sessions (excluding the freshly started listing agent).
     let running: std::collections::HashMap<String, helix_acp::AgentId> = cx
         .editor
         .acp
         .iter()
         .filter_map(|(id, client)| {
-            client.resume_session_id.as_ref()
-                .or(client.session_id.as_ref())
-                .map(|sid| (sid.clone(), id))
+            if id == agent_id {
+                return None;
+            }
+            client.session_id.as_ref().map(|sid| (sid.clone(), id))
         })
         .collect();
-
     let active_agent_id = cx.editor.acp.active_agent_id;
 
-    #[derive(Clone)]
-    enum SessionItem {
-        New,
-        Existing {
-            entry: crate::session::SessionEntry,
-            /// AgentId if this session is currently running.
-            running_agent: Option<helix_acp::AgentId>,
-            /// True when this is the session currently shown in the panel.
-            is_active: bool,
-        },
-    }
+    cx.jobs.callback(async move {
+        // Start MCP server on first use.
+        let mcp_addr = if let Some(addr) = existing_mcp_addr {
+            Some(addr)
+        } else {
+            match helix_mcp::run_mcp_server(None).await {
+                Ok(addr) => Some(addr),
+                Err(e) => {
+                    log::warn!("helix-mcp: failed to start MCP server: {e}");
+                    None
+                }
+            }
+        };
 
-    let mut items: Vec<SessionItem> = vec![SessionItem::New];
-    items.extend(sessions.into_iter().map(|s| {
-        let running_agent = running.get(&s.session_id).copied();
-        let is_active = running_agent.is_some() && running_agent == active_agent_id;
-        SessionItem::Existing { entry: s, running_agent, is_active }
-    }));
+        let init_result = handle
+            .initialize()
+            .await
+            .map_err(|e| anyhow::anyhow!("ACP agent '{name}' init failed: {e}"))?;
+        let caps = init_result.capabilities;
+        let auth_methods = init_result.auth_methods;
 
-    let columns = [
-        PickerColumn::new("", |item: &SessionItem, _| match item {
-            SessionItem::New => " ".into(),
-            SessionItem::Existing { is_active: true, .. } => "▶".into(),
-            SessionItem::Existing { running_agent: Some(_), .. } => "●".into(),
-            SessionItem::Existing { .. } => " ".into(),
-        }),
-        PickerColumn::new("name", |item: &SessionItem, _| match item {
-            SessionItem::New => "[ New Session ]".into(),
-            SessionItem::Existing { entry, .. } => entry.slug.as_str().into(),
-        }),
-        PickerColumn::new("branch", |item: &SessionItem, _| match item {
-            SessionItem::New => "".into(),
-            SessionItem::Existing { entry, .. } => entry.git_branch.as_str().into(),
-        }),
-        PickerColumn::new("date", |item: &SessionItem, _| match item {
-            SessionItem::New => "".into(),
-            SessionItem::Existing { entry, .. } => {
-                let date = if entry.timestamp.len() >= 10 {
-                    &entry.timestamp[..10]
-                } else {
-                    entry.timestamp.as_str()
+        // Authenticate if needed.
+        if auth_methods.iter().any(|m| m.id == "claude-login") {
+            if let Some(token) = read_claude_oauth_token() {
+                use helix_acp::types::AuthenticateParams;
+                let params = AuthenticateParams {
+                    extra: serde_json::json!({ "methodId": "claude-login", "token": token })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
                 };
-                date.into()
-            }
-        }),
-        PickerColumn::new("summary", |item: &SessionItem, _| match item {
-            SessionItem::New => "Start a fresh Claude Code session".into(),
-            SessionItem::Existing { entry, .. } => entry.summary.as_str().into(),
-        }),
-    ];
-
-    let picker = Picker::new(columns, 0, items, (), |cx, item, _action| {
-        match item {
-            SessionItem::New => start_agent_session(cx, None),
-            SessionItem::Existing { running_agent: Some(agent_id), .. } => {
-                // Switch the panel to the already-running agent.
-                let agent_id = *agent_id;
-                cx.editor.acp.active_agent_id = Some(agent_id);
-                cx.jobs.callback(async move {
-                    Ok(job::Callback::EditorCompositor(Box::new(
-                        move |_editor, compositor| {
-                            compositor.remove(crate::ui::AgentPanel::ID);
-                            compositor.push(Box::new(crate::ui::AgentPanel::new(agent_id)));
-                        },
-                    )))
-                });
-            }
-            SessionItem::Existing { entry, running_agent: None, .. } => {
-                start_agent_session(cx, Some(entry.session_id.clone()));
+                if let Err(e) = handle.authenticate(params).await {
+                    log::warn!("ACP: '{name}' auth failed: {e}");
+                }
             }
         }
-    });
 
-    cx.push_layer(Box::new(overlaid(picker)));
+        // List sessions via ACP — agent uses Claude SDK's listSessions() internally.
+        let acp_sessions = handle
+            .session_list(Some(cwd.clone()))
+            .await
+            .unwrap_or_default();
+
+        Ok(job::Callback::EditorCompositor(Box::new(move |editor, compositor| {
+            if editor.mcp_addr.is_none() {
+                editor.mcp_addr = mcp_addr;
+            }
+            if let Some(client) = editor.acp.get_mut(agent_id) {
+                client.capabilities = Some(caps);
+                client.auth_methods = auth_methods;
+            }
+
+            // Convert ACP sessions to SessionEntry for picker columns.
+            let sessions: Vec<crate::session::SessionEntry> = acp_sessions
+                .into_iter()
+                .map(|s| crate::session::SessionEntry {
+                    session_id: s.session_id.clone(),
+                    slug: if !s.title.is_empty() {
+                        s.title
+                    } else {
+                        s.session_id[..s.session_id.len().min(8)].to_owned()
+                    },
+                    git_branch: String::new(),
+                    timestamp: s.updated_at,
+                    summary: String::new(),
+                })
+                .collect();
+
+            #[derive(Clone)]
+            enum SessionItem {
+                New,
+                Existing {
+                    entry: crate::session::SessionEntry,
+                    running_agent: Option<helix_acp::AgentId>,
+                    is_active: bool,
+                },
+            }
+
+            let mut items: Vec<SessionItem> = vec![SessionItem::New];
+            items.extend(sessions.into_iter().map(|s| {
+                let running_agent = running.get(&s.session_id).copied();
+                let is_active =
+                    running_agent.is_some() && running_agent == active_agent_id;
+                SessionItem::Existing { entry: s, running_agent, is_active }
+            }));
+
+            let columns = [
+                PickerColumn::new("", |item: &SessionItem, _| match item {
+                    SessionItem::New => " ".into(),
+                    SessionItem::Existing { is_active: true, .. } => "▶".into(),
+                    SessionItem::Existing { running_agent: Some(_), .. } => "●".into(),
+                    SessionItem::Existing { .. } => " ".into(),
+                }),
+                PickerColumn::new("name", |item: &SessionItem, _| match item {
+                    SessionItem::New => "[ New Session ]".into(),
+                    SessionItem::Existing { entry, .. } => entry.slug.as_str().into(),
+                }),
+                PickerColumn::new("date", |item: &SessionItem, _| match item {
+                    SessionItem::New => "".into(),
+                    SessionItem::Existing { entry, .. } => {
+                        let date = if entry.timestamp.len() >= 10 {
+                            &entry.timestamp[..10]
+                        } else {
+                            entry.timestamp.as_str()
+                        };
+                        date.into()
+                    }
+                }),
+                PickerColumn::new("summary", |item: &SessionItem, _| match item {
+                    SessionItem::New => "Start a fresh Claude Code session".into(),
+                    SessionItem::Existing { entry, .. } => entry.slug.as_str().into(),
+                }),
+            ];
+
+            let handle_pick = handle.clone();
+            let cwd_pick = cwd.clone();
+            let picker = Picker::new(
+                columns,
+                0,
+                items,
+                (),
+                move |cx, item, _action| match item {
+                    SessionItem::New => {
+                        // Reuse the already-initialized listing agent for the new session.
+                        cx.editor.acp.active_agent_id = Some(agent_id);
+                        let handle2 = handle_pick.clone();
+                        let cwd2 = cwd_pick.clone();
+                        cx.jobs.callback(async move {
+                            Ok(job::Callback::EditorCompositor(Box::new(
+                                move |_editor, compositor| {
+                                    compositor.remove(crate::ui::AgentPanel::ID);
+                                    compositor
+                                        .push(Box::new(crate::ui::AgentPanel::new(agent_id)));
+                                },
+                            )))
+                        });
+                        cx.jobs.callback(async move {
+                            let result = handle2
+                                .session_new(cwd2, mcp_addr)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("session/new failed: {e}"))?;
+                            let sid = result.session_id;
+                            let config_options = result.config_options;
+                            Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
+                                if let Some(client) = editor.acp.get_mut(agent_id) {
+                                    client.session_id = Some(sid.clone());
+                                    client.config_options = config_options;
+                                }
+                                log::info!("ACP: agent ready (session={sid})");
+                            })))
+                        });
+                    }
+                    SessionItem::Existing { running_agent: Some(existing_id), .. } => {
+                        // Switch the panel to the already-running agent;
+                        // discard the listing agent.
+                        let existing_id = *existing_id;
+                        cx.editor.acp.active_agent_id = Some(existing_id);
+                        cx.editor.acp.stop_agent(agent_id);
+                        cx.jobs.callback(async move {
+                            Ok(job::Callback::EditorCompositor(Box::new(
+                                move |_editor, compositor| {
+                                    compositor.remove(crate::ui::AgentPanel::ID);
+                                    compositor.push(Box::new(
+                                        crate::ui::AgentPanel::new(existing_id),
+                                    ));
+                                },
+                            )))
+                        });
+                    }
+                    SessionItem::Existing { entry, running_agent: None, .. } => {
+                        // Reuse the listing agent, load the chosen session.
+                        let session_id = entry.session_id.clone();
+                        cx.editor.acp.active_agent_id = Some(agent_id);
+                        let handle2 = handle_pick.clone();
+                        cx.jobs.callback(async move {
+                            Ok(job::Callback::EditorCompositor(Box::new(
+                                move |_editor, compositor| {
+                                    compositor.remove(crate::ui::AgentPanel::ID);
+                                    compositor
+                                        .push(Box::new(crate::ui::AgentPanel::new(agent_id)));
+                                },
+                            )))
+                        });
+                        cx.jobs.callback(async move {
+                            handle2
+                                .session_load(session_id.clone())
+                                .await
+                                .map_err(|e| anyhow::anyhow!("session/load failed: {e}"))?;
+                            Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
+                                if let Some(client) = editor.acp.get_mut(agent_id) {
+                                    client.session_id = Some(session_id.clone());
+                                }
+                                log::info!("ACP: session loaded ({session_id})");
+                            })))
+                        });
+                    }
+                },
+            );
+
+            compositor.push(Box::new(overlaid(picker)));
+        })))
+    });
 }

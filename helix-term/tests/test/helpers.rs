@@ -375,6 +375,14 @@ impl AppBuilder {
         self
     }
 
+    pub fn with_mcp(mut self, auto_approve: bool) -> Self {
+        self.args.mcp = true;
+        self.args.mcp_port = None; // port 0 → random
+        self.args.mcp_auto_approve = auto_approve;
+        self
+    }
+
+
     pub fn build(self) -> anyhow::Result<Application> {
         if let Some(path) = &self.args.working_directory {
             bail!("Changing the working directory to {path:?} is not yet supported for integration tests");
