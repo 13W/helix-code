@@ -14,7 +14,7 @@ pub struct SessionEntry {
 pub fn sessions_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let cwd = std::env::current_dir().ok()?;
-    let encoded = cwd.to_string_lossy().replace('/', "-");
+    let encoded = cwd.to_string_lossy().replace('/', "-").replace('.', "-");
     Some(PathBuf::from(home).join(".claude/projects").join(encoded))
 }
 

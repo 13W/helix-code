@@ -425,7 +425,6 @@ pub enum DisplayLine {
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
-
 /// Accumulated token and cost statistics for the current session.
 #[derive(Debug, Default)]
 pub struct SessionUsage {
@@ -433,6 +432,10 @@ pub struct SessionUsage {
     pub output_tokens: u64,
     pub cost_amount: f64,
     pub currency: String,
+    /// Context window tokens used (from UsageUpdate).
+    pub context_used: u64,
+    /// Context window total size (from UsageUpdate).
+    pub context_size: u64,
 }
 
 /// An ACP agent client connected via stdio.
