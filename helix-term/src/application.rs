@@ -3631,51 +3631,77 @@ impl Application {
                     .clone()
                     .unwrap_or_else(|| "Permission required".to_string());
 
-                // If the tool call carries a plan in rawInput.plan, push it
-                // to the agent panel display buffer so it shows up in the UI.
-                if let Some(plan) = params
+                // Extract plan text from rawInput.plan (if present) for two purposes:
+                // 1. Push it to the display buffer so it appears in the agent panel.
+                // 2. Offer an "Apply (clean context)" option in the permission dialog.
+                let plan_text = params
                     .tool_call
                     .fields
                     .raw_input
                     .as_ref()
                     .and_then(|ri| ri["plan"].as_str())
-                    .map(|s| s.to_string())
-                {
+                    .map(|s| s.to_string());
+
+                if let Some(ref plan) = plan_text {
                     if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                        client.display.push(helix_acp::DisplayLine::Text(plan));
+                        client.display.push(helix_acp::DisplayLine::Text(plan.clone()));
                     }
+                }
+
+                // Build items: agent-provided options, plus our injected option when a plan
+                // is present.
+                let mut items: Vec<PermOption> = params
+                    .options
+                    .into_iter()
+                    .map(PermOption::Agent)
+                    .collect();
+                if let Some(ref plan) = plan_text {
+                    items.push(PermOption::CleanContext { plan: plan.clone() });
                 }
 
                 let select = ui::Select::new(
                     title,
-                    params.options,
+                    items,
                     (),
-                    move |editor, option: &helix_acp::sdk::PermissionOption, event| {
+                    move |editor, option: &PermOption, event| {
                         use crate::ui::PromptEvent;
                         let response = match event {
                             PromptEvent::Update => return,
-                            PromptEvent::Validate => {
-                                // When the user picks "always allow", signal the job to
-                                // auto-continue after the current turn ends.
-                                if option.kind == PermissionOptionKind::AllowAlways {
-                                    if let Some(ref ac) = auto_continue_arc {
-                                        ac.store(
-                                            true,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        );
-                                    }
+                            PromptEvent::Validate => match option {
+                                PermOption::CleanContext { plan } => {
+                                    // Store plan for deferred new-session processing;
+                                    // cancel the current permission/turn.
                                     if let Some(client) = editor.acp.get_mut(agent_id) {
-                                        client.auto_accept_edits = true;
+                                        client.pending_clean_context_plan =
+                                            Some(plan.clone());
                                     }
+                                    RequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Cancelled,
+                                    )
                                 }
-                                RequestPermissionResponse::new(
-                                    RequestPermissionOutcome::Selected(
-                                        SelectedPermissionOutcome::new(
-                                            option.option_id.clone(),
+                                PermOption::Agent(opt) => {
+                                    // When the user picks "always allow", signal the job to
+                                    // auto-continue after the current turn ends.
+                                    if opt.kind == PermissionOptionKind::AllowAlways {
+                                        if let Some(ref ac) = auto_continue_arc {
+                                            ac.store(
+                                                true,
+                                                std::sync::atomic::Ordering::SeqCst,
+                                            );
+                                        }
+                                        if let Some(client) = editor.acp.get_mut(agent_id) {
+                                            client.auto_accept_edits = true;
+                                        }
+                                    }
+                                    RequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Selected(
+                                            SelectedPermissionOutcome::new(
+                                                opt.option_id.clone(),
+                                            ),
                                         ),
-                                    ),
-                                )
-                            }
+                                    )
+                                }
+                            },
                             PromptEvent::Abort => RequestPermissionResponse::new(
                                 RequestPermissionOutcome::Cancelled,
                             ),
@@ -3890,6 +3916,83 @@ impl Application {
             event => self.compositor.handle_event(&event.into(), &mut cx),
         };
 
+        // After compositor event handling, check for any pending clean-context plan
+        // (set by the permission dialog callback when user selects "Apply (clean context)").
+
+        // After compositor event handling, check for any pending clean-context plan
+        // (set by the permission dialog callback when user selects "Apply (clean context)").
+        {
+            use helix_acp::AgentId;
+            let pending: Vec<(AgentId, String)> = self
+                .editor
+                .acp
+                .iter()
+                .filter_map(|(id, c)| {
+                    c.pending_clean_context_plan
+                        .as_ref()
+                        .map(|p| (id, p.clone()))
+                })
+                .collect();
+
+            for (agent_id, plan_text) in pending {
+                if let Some(client) = self.editor.acp.get_mut(agent_id) {
+                    client.pending_clean_context_plan = None;
+                    client.display.clear();
+                    client.session_usage = helix_acp::client::SessionUsage::default();
+                    client.current_mode = None;
+                    client.is_prompting = true;
+                }
+                if let Some(client) = self.editor.acp.get(agent_id) {
+                    let handle = client.handle();
+                    let mcp_addr = self.editor.mcp_addr;
+                    let cwd = std::env::current_dir()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    self.jobs.callback(async move {
+                        use crate::job::Callback;
+                        // 1. Create a fresh session — no planning history.
+                        let r = handle
+                            .session_new(cwd, mcp_addr)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("session/new failed: {e}"))?;
+                        let new_sid = r.session_id;
+                        // 2. Switch to accept-edits before sending the plan.
+                        handle
+                            .session_set_mode(new_sid.clone(), "acceptEdits".to_string())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("session/set_mode failed: {e}"))?;
+                        // 3. Send the approved plan as the first prompt.
+                        let prompt = vec![helix_acp::ContentBlock::text(plan_text)];
+                        match handle
+                            .session_prompt(new_sid.clone(), prompt)
+                            .await
+                        {
+                            Err(e) => {
+                                let sid = new_sid;
+                                return Ok(Callback::Editor(Box::new(move |editor| {
+                                    if let Some(c) = editor.acp.get_mut(agent_id) {
+                                        c.is_prompting = false;
+                                        c.session_id = Some(sid);
+                                    }
+                                    editor.set_error(format!("Agent error: {e}"));
+                                })));
+                            }
+                            Ok(_stop) => {}
+                        }
+                        let sid = new_sid;
+                        Ok(Callback::Editor(Box::new(move |editor| {
+                            if let Some(c) = editor.acp.get_mut(agent_id) {
+                                c.is_prompting = false;
+                                c.session_id = Some(sid);
+                            }
+                            editor.set_status("Agent done (clean context)");
+                        })))
+                    });
+                    self.editor.set_status("Applying plan in clean context\u{2026}");
+                }
+            }
+        }
         if should_redraw && !self.editor.should_close() {
             self.render().await;
         }
@@ -4516,5 +4619,21 @@ impl ui::menu::Item for helix_acp::sdk::PermissionOption {
     type Data = ();
     fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
         self.name.as_str().into()
+    }
+}
+
+/// Wraps agent-provided permission options plus Helix-injected extras.
+enum PermOption {
+    Agent(helix_acp::sdk::PermissionOption),
+    CleanContext { plan: String },
+}
+
+impl ui::menu::Item for PermOption {
+    type Data = ();
+    fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
+        match self {
+            PermOption::Agent(opt) => opt.name.as_str().into(),
+            PermOption::CleanContext { .. } => "Apply (clean context)".into(),
+        }
     }
 }
