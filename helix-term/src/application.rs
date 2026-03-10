@@ -3561,6 +3561,7 @@ impl Application {
                         }
                         client.session_usage.context_used = uu.used;
                         client.session_usage.context_size = uu.size;
+                        client.session_usage.total_used += uu.used;
                     }
                     _ => {}
                 }
@@ -3682,7 +3683,8 @@ impl Application {
                         let _ = reply.lock().unwrap().take().map(|tx| tx.send(response));
                     },
                 )
-                .no_auto_close();
+                .no_auto_close()
+                .with_id("acp-permission");
 
                 self.compositor.replace_or_push("acp-permission", select);
                 // Do NOT send a reply here — the Select callback sends it.
@@ -3746,6 +3748,7 @@ impl Application {
                     client.session_usage.currency = currency;
                     client.session_usage.context_used = used;
                     client.session_usage.context_size = size;
+                    client.session_usage.total_used += used;
                 }
                 helix_event::request_redraw();
             }
