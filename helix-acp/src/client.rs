@@ -97,6 +97,7 @@ enum AgentRpcCall {
     },
     LoadSession {
         session_id: SessionId,
+        mcp_addr: Option<std::net::SocketAddr>,
         reply: oneshot::Sender<Result<()>>,
     },
     Prompt {
@@ -212,6 +213,23 @@ fn try_parse_turn_tokens(line: &[u8]) -> Option<(u64, u64)> {
     Some((input, output))
 }
 
+// Rewrite outgoing JSON-RPC method names that claude-code-acp exposes without
+// the `_` prefix required by the ACP extension-method spec.
+// Returns the rewritten line (owned) only when a rewrite was performed.
+fn rewrite_outgoing_method<'a>(line: &'a str, from: &str, to: &str) -> std::borrow::Cow<'a, str> {
+    if !line.contains(from) {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+        if v.get("method").and_then(|m| m.as_str()) == Some(from) {
+            v["method"] = serde_json::Value::String(to.to_string());
+            let mut s = v.to_string();
+            s.push('\n');
+            return std::borrow::Cow::Owned(s);
+        }
+    }
+    std::borrow::Cow::Borrowed(line)
+}
 async fn rpc_actor(
     conn: Rc<sdk::ClientSideConnection>,
     mut rpc_rx: UnboundedReceiver<AgentRpcCall>,
@@ -278,10 +296,18 @@ async fn rpc_actor(
                     let _ = reply.send(result);
                 }
 
-                AgentRpcCall::LoadSession { session_id, reply } => {
+                AgentRpcCall::LoadSession { session_id, mcp_addr, reply } => {
                     let cwd = std::env::current_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let req = sdk::LoadSessionRequest::new(session_id, cwd);
+                    let mut req = sdk::LoadSessionRequest::new(session_id, cwd);
+                    if let Some(addr) = mcp_addr {
+                        req = req.mcp_servers(vec![
+                            sdk::McpServer::Http(sdk::McpServerHttp::new(
+                                "helix",
+                                format!("http://{addr}/mcp"),
+                            )),
+                        ]);
+                    }
                     let result = conn.load_session(req).await
                         .map(|_| ())
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
@@ -335,7 +361,11 @@ async fn rpc_actor(
 
                 AgentRpcCall::ListSessions { cwd, reply } => {
                     use sdk::Agent as _;
-                    let params_json = serde_json::json!({ "cwd": cwd });
+                    let params_json = if let Some(ref dir) = cwd {
+                        serde_json::json!({ "cwd": dir })
+                    } else {
+                        serde_json::json!({})
+                    };
                     let raw = serde_json::value::RawValue::from_string(params_json.to_string())
                         .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
                     let req = sdk::ExtRequest::new("session/list", std::sync::Arc::from(raw));
@@ -518,6 +548,8 @@ pub struct Client {
     pub config_options: Vec<sdk::SessionConfigOption>,
     /// Pending (option_id, value) to apply via `session_set_config_option` from the UI.
     pub pending_config_change: Option<(String, String)>,
+    /// Plan text waiting to be applied in a new clean-context session.
+    pub pending_clean_context_plan: Option<String>,
 }
 
 impl Client {
@@ -620,10 +652,33 @@ impl Client {
                         }
                     });
 
+                    // Intercept stdin to rewrite extension method names that
+                    // claude-code-acp exposes without the ACP `_` prefix.
+                    let (duplex_stdin_sdk, duplex_stdin_agent) = tokio::io::duplex(64 * 1024);
+                    tokio::task::spawn_local(async move {
+                        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                        let mut reader = BufReader::new(duplex_stdin_agent);
+                        let mut writer = stdin;
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            match reader.read_line(&mut line).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    let out = rewrite_outgoing_method(&line, "_session/list", "session/list");
+                                    if writer.write_all(out.as_bytes()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+
                     // SDK reads from duplex instead of raw stdout.
                     let (conn, io_task) = sdk::ClientSideConnection::new(
                         handler,
-                        stdin.compat_write(),
+                        duplex_stdin_sdk.compat_write(),
                         duplex_sdk.compat(),
                         |fut| {
                             tokio::task::spawn_local(fut);
@@ -676,6 +731,7 @@ impl Client {
             pending_command: None,
             config_options: Vec::new(),
             pending_config_change: None,
+            pending_clean_context_plan: None,
         };
 
         Ok((client, event_rx))
@@ -715,8 +771,12 @@ impl Client {
         Ok(sid)
     }
 
-    pub async fn session_load(&mut self, session_id: SessionId) -> Result<()> {
-        self.handle().session_load(session_id.clone()).await?;
+    pub async fn session_load(
+        &mut self,
+        session_id: SessionId,
+        mcp_addr: Option<std::net::SocketAddr>,
+    ) -> Result<()> {
+        self.handle().session_load(session_id.clone(), mcp_addr).await?;
         self.session_id = Some(session_id);
         Ok(())
     }
@@ -837,8 +897,12 @@ impl ClientHandle {
         Ok(result)
     }
 
-    pub async fn session_load(&self, session_id: SessionId) -> Result<()> {
-        self.call(|reply| AgentRpcCall::LoadSession { session_id, reply }).await
+    pub async fn session_load(
+        &self,
+        session_id: SessionId,
+        mcp_addr: Option<std::net::SocketAddr>,
+    ) -> Result<()> {
+        self.call(|reply| AgentRpcCall::LoadSession { session_id, mcp_addr, reply }).await
     }
 
     pub async fn session_prompt(
