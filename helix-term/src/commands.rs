@@ -7159,7 +7159,6 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let existing_mcp_addr = cx.editor.mcp_addr;
 
             // Push the panel before init completes so it appears immediately.
             cx.jobs.callback(async move {
@@ -7173,16 +7172,12 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
 
             // Async init: start the MCP server, initialize the agent, create or resume a session.
             cx.jobs.callback(async move {
-                // Start the embedded MCP server on first use.
-                let mcp_addr = if let Some(addr) = existing_mcp_addr {
-                    Some(addr)
-                } else {
-                    match helix_mcp::run_mcp_server(None).await {
-                        Ok(addr) => Some(addr),
-                        Err(e) => {
-                            log::warn!("helix-mcp: failed to start MCP server: {e}");
-                            None
-                        }
+                // Start the embedded MCP server on first use (singleton — safe to call many times).
+                let mcp_addr = match helix_mcp::get_or_start_mcp_server().await {
+                    Ok(addr) => Some(addr),
+                    Err(e) => {
+                        log::warn!("helix-mcp: failed to start MCP server: {e}");
+                        None
                     }
                 };
                 let init_result = handle.initialize().await.map_err(|e| {
@@ -7229,7 +7224,7 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
 
                 // Use load_session for resume, session_new for a fresh session.
                 let (sid, config_options) = if let Some(ref id) = resume_id {
-                    handle.session_load(id.clone()).await.map_err(|e| {
+                    handle.session_load(id.clone(), mcp_addr).await.map_err(|e| {
                         anyhow::anyhow!("ACP agent '{name}' session load failed: {e}")
                     })?;
                     (id.clone(), vec![])
@@ -7342,9 +7337,10 @@ fn session_picker(cx: &mut Context) {
 
     let handle = cx.editor.acp.get(agent_id).unwrap().handle();
     let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let existing_mcp_addr = cx.editor.mcp_addr;
 
     // Snapshot running sessions (excluding the freshly started listing agent).
     let running: std::collections::HashMap<String, helix_acp::AgentId> = cx
@@ -7361,16 +7357,12 @@ fn session_picker(cx: &mut Context) {
     let active_agent_id = cx.editor.acp.active_agent_id;
 
     cx.jobs.callback(async move {
-        // Start MCP server on first use.
-        let mcp_addr = if let Some(addr) = existing_mcp_addr {
-            Some(addr)
-        } else {
-            match helix_mcp::run_mcp_server(None).await {
-                Ok(addr) => Some(addr),
-                Err(e) => {
-                    log::warn!("helix-mcp: failed to start MCP server: {e}");
-                    None
-                }
+        // Start MCP server on first use (singleton — safe to call many times).
+        let mcp_addr = match helix_mcp::get_or_start_mcp_server().await {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                log::warn!("helix-mcp: failed to start MCP server: {e}");
+                None
             }
         };
 
@@ -7394,14 +7386,22 @@ fn session_picker(cx: &mut Context) {
                 if let Err(e) = handle.authenticate(params).await {
                     log::warn!("ACP: '{name}' auth failed: {e}");
                 }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "ACP: '{name}' requires authentication — log in with Claude Code first"
+                ));
             }
         }
 
         // List sessions via ACP — agent uses Claude SDK's listSessions() internally.
-        let acp_sessions = handle
-            .session_list(Some(cwd.clone()))
-            .await
-            .unwrap_or_default();
+        // Pass None to list all sessions across all projects (not filtered by cwd).
+        let acp_sessions = match handle.session_list(None).await {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                log::warn!("ACP: session_list failed: {e}");
+                vec![]
+            }
+        };
 
         Ok(job::Callback::EditorCompositor(Box::new(move |editor, compositor| {
             if editor.mcp_addr.is_none() {
@@ -7545,7 +7545,7 @@ fn session_picker(cx: &mut Context) {
                         });
                         cx.jobs.callback(async move {
                             handle2
-                                .session_load(session_id.clone())
+                                .session_load(session_id.clone(), mcp_addr)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("session/load failed: {e}"))?;
                             Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
