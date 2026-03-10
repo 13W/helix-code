@@ -987,6 +987,59 @@ impl Component for AgentPanel {
                 self.open_config_option_menu(cx, "mode")
             }
 
+            // Alt+/: show sent-message history picker.
+            KeyCode::Char('/') if key.modifiers == KeyModifiers::ALT => {
+                let messages: Vec<String> = cx.editor.acp
+                    .get(self.agent_id)
+                    .map(|client| {
+                        client.display.iter()
+                            .filter_map(|line| {
+                                if let helix_acp::DisplayLine::UserMessage(text) = line {
+                                    Some(text.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if messages.is_empty() {
+                    return EventResult::Consumed(None);
+                }
+
+                let items: Vec<crate::ui::MultiMenuItem> = messages.iter()
+                    .map(|msg| crate::ui::MultiMenuItem {
+                        label: msg.chars().take(80).collect::<String>()
+                            + if msg.chars().count() > 80 { "\u{2026}" } else { "" },
+                        sublabel: None,
+                    })
+                    .collect();
+
+                let selected = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+                let selected_for_close = selected.clone();
+
+                let menu = crate::ui::MultiMenu::new(items, move |_editor, idx, event| {
+                    use crate::ui::PromptEvent;
+                    if event != PromptEvent::Validate { return; }
+                    *selected.borrow_mut() = messages.get(idx).cloned();
+                })
+                .with_on_close(move |compositor, _cx| {
+                    if let Some(text) = selected_for_close.borrow_mut().take() {
+                        if let Some(panel) = compositor.find_id::<AgentPanel>(AgentPanel::ID) {
+                            panel.insert_input_text(&text);
+                        }
+                    }
+                });
+
+                EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+                    compositor.push(Box::new(menu));
+                })))
+            }
+
             // Alt+Shift+F: toggle fullscreen.
             KeyCode::Char('F') if key.modifiers == KeyModifiers::ALT
                 || key.modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT) => {

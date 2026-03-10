@@ -520,6 +520,9 @@ pub enum McpCommand {
 
 static MCP_EDITOR_TX: OnceLock<mpsc::Sender<McpCommand>> = OnceLock::new();
 
+/// Cached address of the running MCP server (singleton).
+static MCP_SERVER_ADDR: OnceLock<SocketAddr> = OnceLock::new();
+
 /// Called once by `Application::new()` to wire up the editor ↔ MCP channel.
 /// Returns the `Receiver` end for Application to poll in the event loop.
 pub fn init_editor_channel() -> mpsc::Receiver<McpCommand> {
@@ -1009,5 +1012,16 @@ pub async fn run_mcp_server(addr: Option<SocketAddr>) -> Result<SocketAddr> {
     });
 
     log::info!("helix-mcp: MCP server listening at http://{local_addr}/mcp");
+    let _ = MCP_SERVER_ADDR.set(local_addr);
     Ok(local_addr)
+}
+
+/// Returns the address of the already-running MCP server, or starts one if none is running.
+/// Safe to call from multiple tasks — only one server is ever started.
+pub async fn get_or_start_mcp_server() -> Result<SocketAddr> {
+    if let Some(&addr) = MCP_SERVER_ADDR.get() {
+        return Ok(addr);
+    }
+    let addr = run_mcp_server(None).await?;
+    Ok(*MCP_SERVER_ADDR.get().unwrap_or(&addr))
 }
