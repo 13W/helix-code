@@ -960,6 +960,7 @@ impl Application {
                                     path.display()
                                 );
                             }
+                            Self::mcp_trace_jump(&mut self.editor, &path, 0);
                             WriteResult {
                                 path: path.clone(),
                                 lines_changed,
@@ -1011,6 +1012,7 @@ impl Application {
                                             path2.display()
                                         );
                                     }
+                                    Self::mcp_trace_jump(cx.editor, &path2, 0);
                                     WriteResult {
                                         path: path2.clone(),
                                         lines_changed,
@@ -1031,6 +1033,12 @@ impl Application {
             McpCommand::ApplyEdits { path, edits, reply } => {
                 use crate::ui::PromptEvent;
                 use std::sync::Mutex;
+
+                // Compute target line for mcp_trace jump (0-indexed, min start_line).
+                let trace_target_line = edits.iter()
+                    .map(|e| e.start_line.saturating_sub(1))
+                    .min()
+                    .unwrap_or(0);
 
                 // Apply edits to the current content string to produce new content.
                 let apply_result: anyhow::Result<String> = (|| {
@@ -1123,6 +1131,7 @@ impl Application {
                                     path.display()
                                 );
                             }
+                            Self::mcp_trace_jump(&mut self.editor, &path, trace_target_line);
                             WriteResult {
                                 path: path.clone(),
                                 lines_changed,
@@ -1144,6 +1153,7 @@ impl Application {
                 let reply = Arc::new(Mutex::new(Some(reply)));
                 let path2 = path.clone();
                 let content2 = new_content;
+                let trace_target_line2 = trace_target_line;
                 let prompt = ui::Prompt::new(
                     format!(
                         "MCP edit_file '{}': apply {lines_changed} changed line(s)? [y/N]: ",
@@ -1173,6 +1183,7 @@ impl Application {
                                             path2.display()
                                         );
                                     }
+                                    Self::mcp_trace_jump(cx.editor, &path2, trace_target_line2);
                                     WriteResult {
                                         path: path2.clone(),
                                         lines_changed,
@@ -3396,6 +3407,7 @@ impl Application {
                             id: id_s,
                             name: tc.title,
                             input,
+                            output: Vec::new(),
                         });
                     }
                     SessionUpdate::ToolCallUpdate(update) => {
@@ -3429,13 +3441,8 @@ impl Application {
                                 }
                             }
                         }
-                        // Flip display entry from in-progress to done.
-                        let status_str = match &update.fields.status {
-                            Some(ToolCallStatus::Completed) | None => "done".to_string(),
-                            Some(other) => format!("{other:?}").to_lowercase(),
-                        };
                         // Extract text lines from content blocks for display.
-                        let output: Vec<String> = update
+                        let new_output: Vec<String> = update
                             .fields
                             .content
                             .as_deref()
@@ -3443,43 +3450,79 @@ impl Application {
                             .iter()
                             .filter_map(|c| {
                                 use helix_acp::sdk::ToolCallContent;
-                                if let ToolCallContent::Content(c) = c {
-                                    if let helix_acp::sdk::ContentBlock::Text(t) = &c.content {
-                                        return Some(t.text.clone());
+                                match c {
+                                    ToolCallContent::Content(c) => {
+                                        if let helix_acp::sdk::ContentBlock::Text(t) = &c.content {
+                                            Some(t.text.clone())
+                                        } else {
+                                            None
+                                        }
                                     }
+                                    ToolCallContent::Diff(diff) => {
+                                        Some(format!("~ {}", diff.path.display()))
+                                    }
+                                    _ => None,
                                 }
-                                None
                             })
                             .flat_map(|s| s.lines().map(|l| l.to_string()).collect::<Vec<_>>())
                             .collect();
-                        if let Some(pos) = client.display.iter().position(|l| {
-                            matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
-                        }) {
-                            let (name, prev_input) =
-                                if let DisplayLine::ToolCall { name, input, .. } =
-                                    &client.display[pos]
+                        // Step A: accumulate output on in-flight ToolCall entry.
+                        if !new_output.is_empty() {
+                            if let Some(pos) = client.display.iter_mut().position(|l| {
+                                matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
+                            }) {
+                                if let DisplayLine::ToolCall { output, .. } =
+                                    &mut client.display[pos]
                                 {
-                                    (name.clone(), input.clone())
+                                    *output = new_output.clone();
+                                }
+                            }
+                        }
+                        // Step B: only flip to ToolDone on an explicit terminal status.
+                        let is_terminal = matches!(
+                            &update.fields.status,
+                            Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
+                        );
+                        if is_terminal {
+                            let status_str = match &update.fields.status {
+                                Some(ToolCallStatus::Failed) => "failed".to_string(),
+                                _ => "done".to_string(),
+                            };
+                            if let Some(pos) = client.display.iter().position(|l| {
+                                matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
+                            }) {
+                                let (name, prev_input, accumulated_output) =
+                                    if let DisplayLine::ToolCall { name, input, output, .. } =
+                                        &client.display[pos]
+                                    {
+                                        (name.clone(), input.clone(), output.clone())
+                                    } else {
+                                        (String::new(), String::new(), Vec::new())
+                                    };
+                                // Prefer update's raw_input/locations; fall back to original.
+                                let update_input = format_tool_input(
+                                    update.fields.raw_input.as_ref(),
+                                    update.fields.locations.as_deref().unwrap_or(&[]),
+                                );
+                                let input = if update_input.is_empty() {
+                                    prev_input
                                 } else {
-                                    (String::new(), String::new())
+                                    update_input
                                 };
-                            // Prefer update's raw_input/locations; fall back to original input.
-                            let update_input = format_tool_input(
-                                update.fields.raw_input.as_ref(),
-                                update.fields.locations.as_deref().unwrap_or(&[]),
-                            );
-                            let input = if update_input.is_empty() {
-                                prev_input
-                            } else {
-                                update_input
-                            };
-                            client.display[pos] = DisplayLine::ToolDone {
-                                id: id_s.clone(),
-                                name,
-                                input,
-                                status: status_str,
-                                output,
-                            };
+                                // Use current update's content if present, else accumulated.
+                                let final_output = if !new_output.is_empty() {
+                                    new_output
+                                } else {
+                                    accumulated_output
+                                };
+                                client.display[pos] = DisplayLine::ToolDone {
+                                    id: id_s.clone(),
+                                    name,
+                                    input,
+                                    status: status_str,
+                                    output: final_output,
+                                };
+                            }
                         }
                         // On completion: collect paths for reload.
                         if update.fields.status == Some(ToolCallStatus::Completed) {
@@ -3757,6 +3800,26 @@ impl Application {
                 .file_event_handler
                 .file_changed(p);
         }
+    }
+
+    /// If MCP trace mode is enabled, switch to the document at `path` and
+    /// jump the cursor to `target_line` (0-indexed), centering the view.
+    fn mcp_trace_jump(editor: &mut helix_view::Editor, path: &std::path::Path, target_line: usize) {
+        if !editor.mcp_trace {
+            return;
+        }
+        let Some(doc_id) = editor.document_id_by_path(path) else {
+            return;
+        };
+        editor.switch(doc_id, helix_view::editor::Action::Replace);
+        let scrolloff = editor.config().scrolloff;
+        let view_id = editor.tree.focus;
+        let view = editor.tree.get_mut(view_id);
+        let doc = editor.documents.get_mut(&doc_id).unwrap();
+        let line = target_line.min(doc.text().len_lines().saturating_sub(1));
+        let char_pos = doc.text().line_to_char(line);
+        doc.set_selection(view_id, Selection::single(char_pos, char_pos));
+        view.ensure_cursor_in_view_center(doc, scrolloff);
     }
 
     pub async fn handle_terminal_events(&mut self, event: std::io::Result<TerminalEvent>) {
