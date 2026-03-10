@@ -661,7 +661,7 @@ impl Component for AgentPanel {
                         compositor.remove(AgentPanel::ID);
                         compositor.remove("acp-permission");
                         compositor.stashed_agent_panel = None;
-                        compositor.stashed_permission_dialog = None;
+                        compositor.stashed_permission_dialogs.clear();
                     })));
                 }
 
