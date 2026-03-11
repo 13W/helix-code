@@ -460,6 +460,7 @@ impl MappableCommand {
         goto_prev_change, "Goto previous change",
         goto_first_change, "Goto first change",
         goto_last_change, "Goto last change",
+        show_diff_base, "Show VCS diff base for hunk at cursor",
         goto_line_start, "Goto line start",
         goto_line_end, "Goto line end",
         goto_column, "Goto column",
@@ -4160,6 +4161,46 @@ fn goto_first_change(cx: &mut Context) {
 
 fn goto_last_change(cx: &mut Context) {
     goto_first_change_impl(cx, true);
+}
+
+
+fn show_diff_base(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let diff_handle = match doc.diff_handle() {
+        Some(h) => h,
+        None => {
+            cx.editor.set_error("No diff available for this buffer");
+            return;
+        }
+    };
+
+    let diff = diff_handle.load();
+    let base_text = diff.diff_base().to_string();
+    let doc_text = doc.text().to_string();
+    let language = doc
+        .language_config()
+        .map(|l| l.language_id.clone())
+        .unwrap_or_default();
+
+    let cursor_line = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..)) as u32;
+
+    let hunks: Vec<helix_vcs::Hunk> = if let Some(idx) = diff.hunk_at(cursor_line, true) {
+        vec![diff.nth_hunk(idx)]
+    } else {
+        Vec::new()
+    };
+
+    drop(diff); // release RwLock before callback
+
+    cx.callback.push(Box::new(move |compositor, _cx| {
+        use crate::ui::{diff_base::DiffBaseView, Popup};
+        let view = DiffBaseView::new(base_text, doc_text, language, hunks);
+        let popup = Popup::new(DiffBaseView::ID, view).auto_close(true);
+        compositor.replace_or_push(DiffBaseView::ID, popup);
+    }));
 }
 
 fn goto_first_change_impl(cx: &mut Context, reverse: bool) {

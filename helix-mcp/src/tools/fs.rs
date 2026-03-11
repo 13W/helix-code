@@ -10,6 +10,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::serde_lenient;
+
 // ---------------------------------------------------------------------------
 // Parameter structs
 // ---------------------------------------------------------------------------
@@ -40,7 +42,7 @@ pub struct SearchParams {
     #[serde(default = "default_dot")]
     pub path: String,
     /// Lines of context before and after each match. Default: 0.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize")]
     pub context_lines: usize,
     /// Case-sensitive matching. Default: true.
     #[serde(default = "default_true")]
