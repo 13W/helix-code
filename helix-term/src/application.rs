@@ -958,13 +958,15 @@ impl Application {
                         .map(|_| {
                             if self.editor.document_by_path(&path).is_some() {
                                 Self::reload_document_by_path(&mut self.editor, &path);
-                            } else if let Err(e) =
-                                self.editor.open(&path, helix_view::editor::Action::Load)
-                            {
-                                log::warn!(
-                                    "MCP write_file: could not open {}: {e}",
-                                    path.display()
-                                );
+                            } else if self.editor.mcp_trace {
+                                if let Err(e) =
+                                    self.editor.open(&path, helix_view::editor::Action::Load)
+                                {
+                                    log::warn!(
+                                        "MCP write_file: could not open {}: {e}",
+                                        path.display()
+                                    );
+                                }
                             }
                             Self::mcp_trace_jump(&mut self.editor, &path, 0);
                             WriteResult {
@@ -1009,14 +1011,16 @@ impl Application {
                                 .map(|_| {
                                     if cx.editor.document_by_path(&path2).is_some() {
                                         Self::reload_document_by_path(cx.editor, &path2);
-                                    } else if let Err(e) = cx
-                                        .editor
-                                        .open(&path2, helix_view::editor::Action::Load)
-                                    {
-                                        log::warn!(
-                                            "MCP write_file: could not open {}: {e}",
-                                            path2.display()
-                                        );
+                                    } else if cx.editor.mcp_trace {
+                                        if let Err(e) = cx
+                                            .editor
+                                            .open(&path2, helix_view::editor::Action::Load)
+                                        {
+                                            log::warn!(
+                                                "MCP write_file: could not open {}: {e}",
+                                                path2.display()
+                                            );
+                                        }
                                     }
                                     Self::mcp_trace_jump(cx.editor, &path2, 0);
                                     WriteResult {
@@ -1129,13 +1133,15 @@ impl Application {
                         .map(|_| {
                             if self.editor.document_by_path(&path).is_some() {
                                 Self::reload_document_by_path(&mut self.editor, &path);
-                            } else if let Err(e) =
-                                self.editor.open(&path, helix_view::editor::Action::Load)
-                            {
-                                log::warn!(
-                                    "MCP edit_file: could not open {}: {e}",
-                                    path.display()
-                                );
+                            } else if self.editor.mcp_trace {
+                                if let Err(e) =
+                                    self.editor.open(&path, helix_view::editor::Action::Load)
+                                {
+                                    log::warn!(
+                                        "MCP edit_file: could not open {}: {e}",
+                                        path.display()
+                                    );
+                                }
                             }
                             Self::mcp_trace_jump(&mut self.editor, &path, trace_target_line);
                             WriteResult {
@@ -1180,14 +1186,16 @@ impl Application {
                                 .map(|_| {
                                     if cx.editor.document_by_path(&path2).is_some() {
                                         Self::reload_document_by_path(cx.editor, &path2);
-                                    } else if let Err(e) = cx
-                                        .editor
-                                        .open(&path2, helix_view::editor::Action::Load)
-                                    {
-                                        log::warn!(
-                                            "MCP edit_file: could not open {}: {e}",
-                                            path2.display()
-                                        );
+                                    } else if cx.editor.mcp_trace {
+                                        if let Err(e) = cx
+                                            .editor
+                                            .open(&path2, helix_view::editor::Action::Load)
+                                        {
+                                            log::warn!(
+                                                "MCP edit_file: could not open {}: {e}",
+                                                path2.display()
+                                            );
+                                        }
                                     }
                                     Self::mcp_trace_jump(cx.editor, &path2, trace_target_line2);
                                     WriteResult {

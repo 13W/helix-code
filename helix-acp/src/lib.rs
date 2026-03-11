@@ -34,7 +34,7 @@ pub use types::*;
 /// Opaque identifier for a running ACP agent.
 ///
 /// Constructed only by [`Registry`]; not directly constructable by users.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub(crate) u64);
 
 impl std::fmt::Display for AgentId {

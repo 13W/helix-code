@@ -296,6 +296,21 @@ impl Component for AgentPanel {
         // Build title: status first, then model, then mode, then usage — all inline.
         let mut title = format!(" {}", client.name);
 
+        // Session index: position among all agents with an active session, ordered by AgentId.
+        {
+            let mut active_ids: Vec<helix_acp::AgentId> = cx
+                .editor
+                .acp
+                .iter()
+                .filter(|(_, c)| c.session_id.is_some())
+                .map(|(id, _)| id)
+                .collect();
+            active_ids.sort();
+            if let Some(pos) = active_ids.iter().position(|&id| id == self.agent_id) {
+                title.push_str(&format!(" [{}]", pos + 1));
+            }
+        }
+
         // Status badge first.
 
         // Model label from config_options (id = "model").
