@@ -6,6 +6,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use super::serde_lenient;
+
 // ── write_file ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -40,9 +42,11 @@ pub async fn handle_write_file(params: WriteFileParams) -> Result<CallToolResult
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TextEditParams {
     /// First line to replace (1-indexed, inclusive)
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub start_line: usize,
     /// Last line to replace (1-indexed, inclusive).
     /// Use `end_line < start_line` for a pure insertion (no lines removed).
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub end_line: usize,
     /// Replacement text. Empty string to delete lines.
     pub new_text: String,
@@ -53,6 +57,7 @@ pub struct EditFileParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// List of edits to apply
+    #[serde(deserialize_with = "serde_lenient::string_or_vec")]
     pub edits: Vec<TextEditParams>,
 }
 
@@ -94,6 +99,7 @@ pub struct InsertTextParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// Line number before which to insert (1-indexed)
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// Text to insert (should end with a newline)
     pub text: String,
@@ -126,8 +132,10 @@ pub struct RenameSymbolParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// 0-indexed line number of the symbol to rename
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number of the symbol to rename
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
     /// New name for the symbol
     pub new_name: String,

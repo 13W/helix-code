@@ -6,6 +6,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use super::serde_lenient;
+
 // ── get_symbols_overview ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -13,6 +15,7 @@ pub struct GetSymbolsOverviewParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// Depth: 0 = top-level only, 1 = top-level + immediate children. Default: 0.
+    #[serde(default, deserialize_with = "serde_lenient::string_or_u8_opt")]
     pub depth: Option<u8>,
 }
 
@@ -100,8 +103,10 @@ pub struct FindRefsParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// 0-indexed line number of the symbol
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number of the symbol
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
 }
 
