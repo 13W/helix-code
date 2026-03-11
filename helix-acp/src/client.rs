@@ -123,6 +123,9 @@ enum AgentRpcCall {
         cwd: Option<String>,
         reply: oneshot::Sender<Result<Vec<ListedSession>>>,
     },
+    AccountInfo {
+        reply: oneshot::Sender<Result<AccountInfo>>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +388,30 @@ async fn rpc_actor(
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
                 }
+
+                AgentRpcCall::AccountInfo { reply } => {
+                    use sdk::Agent as _;
+                    let raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+                    let req = sdk::ExtRequest::new("account/info", std::sync::Arc::from(raw));
+                    let result = conn.ext_method(req).await
+                        .map(|resp| {
+                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
+                                .unwrap_or_default();
+                            AccountInfo {
+                                email: v["emailAddress"].as_str()
+                                    .or_else(|| v["email"].as_str())
+                                    .map(str::to_owned),
+                                name: v["name"].as_str()
+                                    .or_else(|| v["displayName"].as_str())
+                                    .map(str::to_owned),
+                                account_uuid: v["accountUuid"].as_str()
+                                    .or_else(|| v["id"].as_str())
+                                    .map(str::to_owned),
+                            }
+                        })
+                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
+                    let _ = reply.send(result);
+                }
             }
         });
     }
@@ -549,7 +576,10 @@ pub struct Client {
     /// Pending (option_id, value) to apply via `session_set_config_option` from the UI.
     pub pending_config_change: Option<(String, String)>,
     /// Plan text waiting to be applied in a new clean-context session.
+    /// Plan text waiting to be applied in a new clean-context session.
     pub pending_clean_context_plan: Option<String>,
+    /// Authenticated user info, fetched after `authenticate()` + `session_new()` succeed.
+    pub account_info: Option<AccountInfo>,
 }
 
 impl Client {
@@ -665,7 +695,8 @@ impl Client {
                             match reader.read_line(&mut line).await {
                                 Ok(0) => break,
                                 Ok(_) => {
-                                    let out = rewrite_outgoing_method(&line, "_session/list", "session/list");
+                                     let out = rewrite_outgoing_method(&line, "_session/list", "session/list");
+                                     let out = rewrite_outgoing_method(&out, "_account/info", "account/info");
                                     if writer.write_all(out.as_bytes()).await.is_err() {
                                         break;
                                     }
@@ -732,6 +763,7 @@ impl Client {
             config_options: Vec::new(),
             pending_config_change: None,
             pending_clean_context_plan: None,
+            account_info: None,
         };
 
         Ok((client, event_rx))
@@ -812,6 +844,10 @@ impl Client {
 
     pub async fn session_list(&self, cwd: Option<String>) -> Result<Vec<ListedSession>> {
         self.handle().session_list(cwd).await
+    }
+
+    pub async fn account_info(&self) -> Result<AccountInfo> {
+        self.handle().account_info().await
     }
 
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<StopReason> {
@@ -939,5 +975,9 @@ impl ClientHandle {
 
     pub async fn session_list(&self, cwd: Option<String>) -> Result<Vec<ListedSession>> {
         self.call(|reply| AgentRpcCall::ListSessions { cwd, reply }).await
+    }
+
+    pub async fn account_info(&self) -> Result<AccountInfo> {
+        self.call(|reply| AgentRpcCall::AccountInfo { reply }).await
     }
 }
