@@ -112,11 +112,19 @@ impl AgentPanel {
                     }
                 }
                 DisplayLine::Thought(s) => {
-                    for line in s.lines() {
-                        lines.push(Spans::from(Span::styled(
-                            format!("~ {line}"),
-                            thought_style,
-                        )));
+                    let md = crate::ui::Markdown::new(s.clone(), loader.clone());
+                    let parsed = md.parse(Some(theme));
+                    for spans in parsed.lines {
+                        let owned: Vec<Span<'static>> = spans
+                            .0
+                            .into_iter()
+                            .map(|sp| {
+                                let style =
+                                    sp.style.add_modifier(Modifier::DIM | Modifier::ITALIC);
+                                Span::styled(sp.content.into_owned(), style)
+                            })
+                            .collect();
+                        lines.push(Spans::from(owned));
                     }
                 }
                 DisplayLine::ToolCall { name, input, .. } => {

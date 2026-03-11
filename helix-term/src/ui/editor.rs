@@ -759,8 +759,9 @@ impl EditorView {
         }
 
         // Scroll left if active is before the visible window.
+        // Keep one tab of lookahead (symmetric with right side).
         if active_idx < scroll {
-            scroll = active_idx;
+            scroll = active_idx.saturating_sub(1);
         }
 
         // Check if active fits in the window starting from `scroll`.
