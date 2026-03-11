@@ -109,6 +109,18 @@ pub struct InitializeResult {
 // authenticate
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// account/info
+// ---------------------------------------------------------------------------
+
+/// Account information returned by the ACP `account/info` extension method.
+#[derive(Debug, Clone, Default)]
+pub struct AccountInfo {
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub account_uuid: Option<String>,
+}
+
 /// Flexible authenticate params — the spec leaves the auth method open.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]

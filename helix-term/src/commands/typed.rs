@@ -2992,12 +2992,6 @@ fn agent_prompt(
         client.is_prompting = true;
     }
 
-    // Clone the Arc so the async job can check the flag without holding an editor borrow.
-    let auto_continue = cx
-        .editor
-        .acp
-        .get(agent_id)
-        .map(|c| c.auto_continue.clone());
 
     let prompt = vec![helix_acp::ContentBlock::Text { text: prompt_text }];
 
@@ -3015,46 +3009,24 @@ fn agent_prompt(
         })))
     });
 
-    // Session prompt job.
-    // If the permission dialog set `auto_continue` (user chose "always allow"), we send an
-    // empty-vec follow-up prompt so the agent resumes automatically without user input.
-    // An empty vec avoids the Anthropic 400 error caused by cache_control on empty text blocks.
     let handle2 = handle.clone();
     cx.jobs.callback(async move {
         use crate::job::Callback;
-        use std::sync::atomic::Ordering;
 
-        let mut current_prompt = prompt;
-        let current_session_id = session_id;
-        let mut stop;
-
-        loop {
-            stop = match handle2
-                .session_prompt(current_session_id.clone(), current_prompt)
-                .await
-            {
-                Err(e) => {
-                    return Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
-                        if let Some(client) = editor.acp.get_mut(agent_id) {
-                            client.is_prompting = false;
-                        }
-                        editor.set_error(format!("Agent error: {e}"));
-                    })));
-                }
-                Ok(s) => s,
-            };
-
-            let should_continue = auto_continue
-                .as_ref()
-                .map(|ac| ac.swap(false, Ordering::SeqCst))
-                .unwrap_or(false);
-
-            if should_continue {
-                current_prompt = vec![]; // no user input — continue from where agent left off
-            } else {
-                break;
+        let stop = match handle2
+            .session_prompt(session_id.clone(), prompt)
+            .await
+        {
+            Err(e) => {
+                return Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
+                    if let Some(client) = editor.acp.get_mut(agent_id) {
+                        client.is_prompting = false;
+                    }
+                    editor.set_error(format!("Agent error: {e}"));
+                })));
             }
-        }
+            Ok(s) => s,
+        };
 
         Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
             if let Some(client) = editor.acp.get_mut(agent_id) {
@@ -3125,6 +3097,63 @@ fn agent_auth(
         Ok(Callback::Editor(Box::new(|editor| {
             editor.set_status("ACP: authenticated");
         })))
+    });
+
+    Ok(())
+}
+
+fn agent_whoami(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let agent_id = {
+        let registry = &cx.editor.acp;
+        let name_hint: Option<&str> = args.first().map(|s| s.as_ref());
+        if let Some(name) = name_hint {
+            registry
+                .iter()
+                .find(|(_, c)| c.name == name)
+                .map(|(id, _)| id)
+                .ok_or_else(|| anyhow::anyhow!("no agent named '{name}'"))?
+        } else {
+            registry
+                .iter()
+                .next()
+                .map(|(id, _)| id)
+                .ok_or_else(|| anyhow::anyhow!("no ACP agents are running"))?
+        }
+    };
+
+    let handle = {
+        let client = cx
+            .editor
+            .acp
+            .get(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+        client.handle()
+    };
+
+    cx.jobs.callback(async move {
+        use crate::job::Callback;
+        match handle.account_info().await {
+            Ok(info) => {
+                let msg = match (&info.email, &info.name) {
+                    (Some(e), Some(n)) => format!("ACP: {n} <{e}>"),
+                    (Some(e), None) => format!("ACP: {e}"),
+                    (None, Some(n)) => format!("ACP: {n}"),
+                    _ => "ACP: authenticated (no user info)".to_string(),
+                };
+                Ok(Callback::Editor(Box::new(move |editor| {
+                    editor.set_status(msg);
+                })))
+            }
+            Err(e) => Err(anyhow::anyhow!("account info failed: {e}")),
+        }
     });
 
     Ok(())
@@ -4255,6 +4284,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Authenticate ACP agent using CLAUDE_CODE_OAUTH_TOKEN env var: agent-auth [agent-name]",
         fun: agent_auth,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "agent-whoami",
+        aliases: &["aw"],
+        doc: "Show authenticated Claude Code account info via ACP: agent-whoami [agent-name]",
+        fun: agent_whoami,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(1)),
