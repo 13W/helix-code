@@ -3348,6 +3348,46 @@ impl Application {
                     .collect();
                 let _ = reply.send(entries);
             }
+
+            // --- Buffer management ---
+
+            McpCommand::LoadFile { path, reply } => {
+                let result = if self.editor.document_by_path(&path).is_some() {
+                    Ok(format!("File already loaded: {}", path.display()))
+                } else {
+                    self.editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map(|_| format!("Loaded: {}", path.display()))
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                };
+                let _ = reply.send(result);
+            }
+
+            McpCommand::UnloadFile { path, reply } => {
+                let result = if let Some(doc) = self.editor.document_by_path(&path) {
+                    let doc_id = doc.id();
+                    let is_visible = self
+                        .editor
+                        .tree
+                        .views()
+                        .any(|(view, _)| view.doc == doc_id);
+                    if is_visible {
+                        Err(anyhow::anyhow!(
+                            "Cannot unload: file is currently visible in the editor"
+                        ))
+                    } else {
+                        match self.editor.close_document(doc_id, false) {
+                            Ok(()) => Ok(format!("Unloaded: {}", path.display())),
+                            Err(helix_view::editor::CloseError::DoesNotExist) => Ok(format!("File was not loaded: {}", path.display())),
+                            Err(helix_view::editor::CloseError::BufferModified(name)) => Err(anyhow::anyhow!("Cannot unload modified buffer: {name}")),
+                            Err(helix_view::editor::CloseError::SaveError(e)) => Err(anyhow::anyhow!("Save error while unloading: {e}")),
+                        }
+                    }
+                } else {
+                    Ok(format!("File was not loaded: {}", path.display()))
+                };
+                let _ = reply.send(result);
+            }
         }
     }
 
