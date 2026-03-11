@@ -495,6 +495,20 @@ pub enum McpCommand {
         reply: oneshot::Sender<anyhow::Result<String>>,
     },
 
+    // --- Buffer management ---
+
+    /// Load a file into the editor buffer without displaying it to the user.
+    LoadFile {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
+    /// Unload a background-loaded file from the editor buffer.
+    /// Fails if the file is currently visible in any view.
+    UnloadFile {
+        path: PathBuf,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
+
     // --- Registers & Jumplist ---
 
     /// Read values from a named register.
@@ -909,6 +923,24 @@ impl HelixMcpServer {
         params: Parameters<tools::vcs::DiffBaseParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::vcs::handle_diff_base(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Load a file into the editor buffer without displaying it. Use before calling diff_hunks on files not currently open. The file will not appear in any view.")]
+    async fn load_file(
+        &self,
+        params: Parameters<tools::buffer::LoadFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::buffer::handle_load_file(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Unload a background-loaded file from the editor buffer. Only works on files not currently visible in any view. Use after you are done with diff_hunks or other buffer-dependent tools.")]
+    async fn unload_file(
+        &self,
+        params: Parameters<tools::buffer::UnloadFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::buffer::handle_unload_file(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 
