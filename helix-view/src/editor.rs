@@ -725,6 +725,9 @@ pub enum StatusLineElement {
 
     /// Indicator showing MCP trace mode is active
     McpTraceIndicator,
+
+    /// Indicator showing the number of active ACP agent sessions
+    AcpSessionsIndicator,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs

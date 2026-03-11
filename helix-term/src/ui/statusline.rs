@@ -159,6 +159,7 @@ where
         helix_view::editor::StatusLineElement::Register => render_register,
         helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
         helix_view::editor::StatusLineElement::McpTraceIndicator => render_mcp_trace_indicator,
+        helix_view::editor::StatusLineElement::AcpSessionsIndicator => render_acp_sessions_indicator,
     }
 }
 
@@ -577,6 +578,21 @@ where
         );
     } else {
         write(context, "".into());
+    }
+}
+
+fn render_acp_sessions_indicator<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    let count = context
+        .editor
+        .acp
+        .iter()
+        .filter(|(_, client)| client.session_id.is_some())
+        .count();
+    if count > 0 {
+        write(context, format!(" [AI#{count}] ").into());
     }
 }
 
