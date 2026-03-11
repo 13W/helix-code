@@ -1,3 +1,4 @@
+pub mod diff_base;
 pub mod agent;
 pub mod button;
 mod completion;
