@@ -79,15 +79,11 @@ impl AgentPanel {
         if content_width == 0 {
             return lines.len().max(1);
         }
-        let w = content_width as usize;
-        lines
-            .iter()
-            .map(|spans| {
-                let chars: usize = spans.0.iter().map(|s| s.content.chars().count()).sum();
-                ((chars + w - 1) / w).max(1)
-            })
-            .sum::<usize>()
-            .max(1)
+        let text = tui::text::Text::from(lines);
+        let (_, height) = Paragraph::new(&text)
+            .wrap(Wrap { trim: false })
+            .required_size(content_width);
+        height as usize
     }
 
     /// Build a `Vec<Spans>` from the client's display buffer.
@@ -301,9 +297,6 @@ impl Component for AgentPanel {
         let mut title = format!(" {}", client.name);
 
         // Status badge first.
-        if client.is_prompting {
-            title.push_str(" [thinking…]");
-        }
 
         // Model label from config_options (id = "model").
         if let Some(label) = config_option_current_label(&client.config_options, "model") {
@@ -422,10 +415,18 @@ impl Component for AgentPanel {
             self.scroll = 0;
         }
 
-        // Truncate to stable entries (all except last 2).
-        // Last 2 are always recomputed: the last may be actively growing from streaming,
-        // was added, leaving a stale underestimate in the cache.
-        self.line_heights.truncate(display_len.saturating_sub(2));
+        // Truncate to the earliest potentially-stale entry. Two sources of staleness:
+        // 1. Last 2 entries: the tail may be actively growing from streaming text.
+        // 2. Any in-progress ToolCall: async results can expand a ToolCall at any
+        //    position (output arrives or the entry transitions to ToolDone), so
+        //    everything from the first live ToolCall onward must be recomputed.
+        let first_live = client
+            .display
+            .iter()
+            .position(|e| matches!(e, DisplayLine::ToolCall { .. }))
+            .unwrap_or(display_len);
+        let truncate_to = first_live.min(display_len.saturating_sub(2));
+        self.line_heights.truncate(truncate_to);
 
         for entry in &client.display[self.line_heights.len()..display_len] {
             let h = Self::entry_height(
@@ -521,28 +522,8 @@ impl Component for AgentPanel {
             Vec::new()
         };
 
-        // Convert scroll_within from visual rows to a span count.
-        // Each span may wrap to multiple visual rows; walk the spans
-        // accumulating their visual heights to find how many to skip.
-        let w = inner.width as usize;
-        let mut skip = 0usize;
-        let mut rows_accum = 0usize;
-        for spans in &first_spans {
-            if rows_accum >= scroll_within {
-                break;
-            }
-            let chars: usize = spans.0.iter().map(|s| s.content.chars().count()).sum();
-            let span_rows = if w > 0 { ((chars + w - 1) / w).max(1) } else { 1 };
-            if rows_accum + span_rows > scroll_within {
-                // This span straddles the boundary — show it fully
-                // rather than clipping mid-span.
-                break;
-            }
-            rows_accum += span_rows;
-            skip += 1;
-        }
         let mut lines: Vec<Spans<'static>> = Vec::new();
-        lines.extend_from_slice(&first_spans[skip..]);
+        lines.extend(first_spans);
         lines.extend(rest_spans);
 
         // Show a placeholder while the first chunk is in flight.
@@ -554,6 +535,7 @@ impl Component for AgentPanel {
         let text = Text::from(lines);
         Paragraph::new(&text)
             .wrap(Wrap { trim: false })
+            .scroll((scroll_within as u16, 0))
             .render(content_area, surface);
 
         // Draw horizontal separator above input field.
@@ -792,41 +774,28 @@ impl Component for AgentPanel {
 
                     // Send /clear as a prompt so the agent clears its context too.
                     let state = cx.editor.acp.get(agent_id).and_then(|c| {
-                        c.session_id.clone().map(|sid| (sid, c.handle(), c.auto_continue.clone()))
+                        c.session_id.clone().map(|sid| (sid, c.handle()))
                     });
-                    if let Some((session_id, handle, auto_continue)) = state {
+                    if let Some((session_id, handle)) = state {
                         if let Some(client) = cx.editor.acp.get_mut(agent_id) {
                             client.is_prompting = true;
                         }
                         let prompt = vec![helix_acp::ContentBlock::Text { text }];
                         cx.jobs.callback(async move {
                             use crate::job::Callback;
-                            use std::sync::atomic::Ordering;
 
-                            let mut current_prompt = prompt;
-                            loop {
-                                match handle
-                                    .session_prompt(session_id.clone(), current_prompt)
-                                    .await
-                                {
-                                    Err(e) => {
-                                        return Ok(Callback::Editor(Box::new(
-                                            move |editor: &mut helix_view::Editor| {
-                                                if let Some(c) = editor.acp.get_mut(agent_id) {
-                                                    c.is_prompting = false;
-                                                }
-                                                editor.set_error(format!("Agent error: {e}"));
-                                            },
-                                        )));
-                                    }
-                                    Ok(_stop) => {
-                                        if auto_continue.swap(false, Ordering::SeqCst) {
-                                            current_prompt = vec![];
-                                        } else {
-                                            break;
+                            if let Err(e) = handle
+                                .session_prompt(session_id.clone(), prompt)
+                                .await
+                            {
+                                return Ok(Callback::Editor(Box::new(
+                                    move |editor: &mut helix_view::Editor| {
+                                        if let Some(c) = editor.acp.get_mut(agent_id) {
+                                            c.is_prompting = false;
                                         }
-                                    }
-                                }
+                                        editor.set_error(format!("Agent error: {e}"));
+                                    },
+                                )));
                             }
                             Ok(Callback::Editor(Box::new(
                                 move |editor: &mut helix_view::Editor| {
@@ -848,11 +817,11 @@ impl Component for AgentPanel {
                 let agent_id = self.agent_id;
                 let state = cx.editor.acp.get(agent_id).and_then(|client| {
                     client.session_id.clone().map(|sid| {
-                        (sid, client.handle(), client.auto_continue.clone())
+                        (sid, client.handle())
                     })
                 });
 
-                if let Some((session_id, handle, auto_continue)) = state {
+                if let Some((session_id, handle)) = state {
                     {
                         let client = cx.editor.acp.get_mut(agent_id).unwrap();
                         if !client.display.is_empty() {
@@ -864,38 +833,23 @@ impl Component for AgentPanel {
                     let prompt = vec![helix_acp::ContentBlock::Text { text }];
                     cx.jobs.callback(async move {
                         use crate::job::Callback;
-                        use std::sync::atomic::Ordering;
 
-                        let mut current_prompt = prompt;
-                        let mut stop;
-
-                        loop {
-                            stop = match handle
-                                .session_prompt(session_id.clone(), current_prompt)
-                                .await
-                            {
-                                Err(e) => {
-                                    return Ok(Callback::Editor(Box::new(
-                                        move |editor: &mut helix_view::Editor| {
-                                            if let Some(c) = editor.acp.get_mut(agent_id) {
-                                                c.is_prompting = false;
-                                            }
-                                            editor.set_error(format!("Agent error: {e}"));
-                                        },
-                                    )));
-                                }
-                                Ok(s) => s,
-                            };
-
-                            let should_continue =
-                                auto_continue.swap(false, Ordering::SeqCst);
-
-                            if should_continue {
-                                current_prompt = vec![];
-                            } else {
-                                break;
+                        let stop = match handle
+                            .session_prompt(session_id.clone(), prompt)
+                            .await
+                        {
+                            Err(e) => {
+                                return Ok(Callback::Editor(Box::new(
+                                    move |editor: &mut helix_view::Editor| {
+                                        if let Some(c) = editor.acp.get_mut(agent_id) {
+                                            c.is_prompting = false;
+                                        }
+                                        editor.set_error(format!("Agent error: {e}"));
+                                    },
+                                )));
                             }
-                        }
+                            Ok(s) => s,
+                        };
 
                         Ok(Callback::Editor(Box::new(
                             move |editor: &mut helix_view::Editor| {
