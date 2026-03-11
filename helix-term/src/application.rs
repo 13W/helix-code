@@ -3696,15 +3696,24 @@ impl Application {
                     }
                 }
 
-                // Build items: agent-provided options, plus our injected option when a plan
                 // is present.
+                let allow_always_id = params
+                    .options
+                    .iter()
+                    .find(|o| o.kind == PermissionOptionKind::AllowAlways)
+                    .or_else(|| params.options.first())
+                    .map(|o| o.option_id.to_string())
+                    .unwrap_or_default();
                 let mut items: Vec<PermOption> = params
                     .options
                     .into_iter()
                     .map(PermOption::Agent)
                     .collect();
                 if let Some(ref plan) = plan_text {
-                    items.push(PermOption::CleanContext { plan: plan.clone() });
+                    items.insert(0, PermOption::CleanContext {
+                        plan: plan.clone(),
+                        allow_always_id: allow_always_id.clone(),
+                    });
                 }
 
                 let select = ui::Select::new(
@@ -3716,15 +3725,30 @@ impl Application {
                         let response = match event {
                             PromptEvent::Update => return,
                             PromptEvent::Validate => match option {
-                                PermOption::CleanContext { plan } => {
-                                    // Store plan for deferred new-session processing;
-                                    // cancel the current permission/turn.
+                                PermOption::CleanContext { plan, allow_always_id } => {
+                                    // Store plan for deferred new-session processing.
                                     if let Some(client) = editor.acp.get_mut(agent_id) {
                                         client.pending_clean_context_plan =
                                             Some(plan.clone());
                                     }
+                                    // Run the same side effects as AllowAlways.
+                                    if let Some(ref ac) = auto_continue_arc {
+                                        ac.store(
+                                            true,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                    }
+                                    if let Some(client) = editor.acp.get_mut(agent_id) {
+                                        client.auto_accept_edits = true;
+                                    }
+                                    // Respond with AllowAlways — Claude Code registers this
+                                    // and auto-approves future ExitPlanMode calls.
                                     RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Cancelled,
+                                        RequestPermissionOutcome::Selected(
+                                            SelectedPermissionOutcome::new(
+                                                allow_always_id.clone(),
+                                            ),
+                                        ),
                                     )
                                 }
                                 PermOption::Agent(opt) => {
@@ -3992,32 +4016,30 @@ impl Application {
                 }
                 if let Some(client) = self.editor.acp.get(agent_id) {
                     let handle = client.handle();
-                    let mcp_addr = self.editor.mcp_addr;
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
+                    let session_id = client.session_id.clone();
                     self.jobs.callback(async move {
                         use crate::job::Callback;
-                        // 1. Create a fresh session — no planning history.
-                        let r = handle
-                            .session_new(cwd, mcp_addr)
+                        let sid = match session_id {
+                            Some(s) => s,
+                            None => return Err(anyhow::anyhow!("no active session")),
+                        };
+                        // 1. Clear context on the existing session.
+                        handle
+                            .session_prompt(sid.clone(), vec![helix_acp::ContentBlock::text("/clear")])
                             .await
-                            .map_err(|e| anyhow::anyhow!("session/new failed: {e}"))?;
-                        let new_sid = r.session_id;
+                            .map_err(|e| anyhow::anyhow!("clear failed: {e}"))?;
                         // 2. Switch to accept-edits before sending the plan.
                         handle
-                            .session_set_mode(new_sid.clone(), "acceptEdits".to_string())
+                            .session_set_mode(sid.clone(), "acceptEdits".to_string())
                             .await
                             .map_err(|e| anyhow::anyhow!("session/set_mode failed: {e}"))?;
-                        // 3. Send the approved plan as the first prompt.
+                        // 3. Send the approved plan.
                         let prompt = vec![helix_acp::ContentBlock::text(plan_text)];
                         match handle
-                            .session_prompt(new_sid.clone(), prompt)
+                            .session_prompt(sid.clone(), prompt)
                             .await
                         {
                             Err(e) => {
-                                let sid = new_sid;
                                 return Ok(Callback::Editor(Box::new(move |editor| {
                                     if let Some(c) = editor.acp.get_mut(agent_id) {
                                         c.is_prompting = false;
@@ -4028,7 +4050,6 @@ impl Application {
                             }
                             Ok(_stop) => {}
                         }
-                        let sid = new_sid;
                         Ok(Callback::Editor(Box::new(move |editor| {
                             if let Some(c) = editor.acp.get_mut(agent_id) {
                                 c.is_prompting = false;
@@ -4673,7 +4694,7 @@ impl ui::menu::Item for helix_acp::sdk::PermissionOption {
 /// Wraps agent-provided permission options plus Helix-injected extras.
 enum PermOption {
     Agent(helix_acp::sdk::PermissionOption),
-    CleanContext { plan: String },
+    CleanContext { plan: String, allow_always_id: String },
 }
 
 impl ui::menu::Item for PermOption {
