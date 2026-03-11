@@ -1,3 +1,4 @@
+pub mod buffer;
 pub mod dap;
 pub mod editor;
 pub mod fs;
