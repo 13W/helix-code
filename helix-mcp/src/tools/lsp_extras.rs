@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::{editor_tx, McpCommand};
+use super::serde_lenient;
 
 // ---------------------------------------------------------------------------
 // get_diagnostics
@@ -63,8 +64,10 @@ pub struct HoverParams {
     /// Absolute path to the file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
 }
 
@@ -90,8 +93,10 @@ pub struct CodeActionsParams {
     /// Absolute path to the file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
 }
 
@@ -127,8 +132,10 @@ pub struct InlayHintsParams {
     /// Absolute path to the file.
     pub path: String,
     /// 0-indexed start line.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub start_line: usize,
     /// 0-indexed end line (inclusive).
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub end_line: usize,
 }
 
@@ -176,8 +183,10 @@ pub struct CompletionsParams {
     /// Absolute path to the file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
 }
 
@@ -220,8 +229,10 @@ pub struct SignatureHelpParams {
     /// Absolute path to the file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// 0-indexed column number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub col: usize,
 }
 

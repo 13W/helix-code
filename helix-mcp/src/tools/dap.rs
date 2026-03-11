@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::{editor_tx, McpCommand};
+use super::serde_lenient;
 
 // ---------------------------------------------------------------------------
 // get_breakpoints
@@ -67,6 +68,7 @@ pub struct SetBreakpointParams {
     /// Absolute path to the source file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
     /// Optional conditional expression (e.g. `"x > 5"`).
     pub condition: Option<String>,
@@ -107,6 +109,7 @@ pub struct RemoveBreakpointParams {
     /// Absolute path to the source file.
     pub path: String,
     /// 0-indexed line number.
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub line: usize,
 }
 
@@ -165,6 +168,7 @@ pub async fn handle_get_dap_status() -> anyhow::Result<CallToolResult> {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct GetStackTraceParams {
     /// Thread id to query. Omit to use the active thread.
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
     pub thread_id: Option<usize>,
 }
 
@@ -215,6 +219,7 @@ pub async fn handle_get_stack_trace(
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct GetScopesParams {
     /// Stack frame id (from get_stack_trace).
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub frame_id: usize,
 }
 
@@ -255,6 +260,7 @@ pub async fn handle_get_scopes(params: GetScopesParams) -> anyhow::Result<CallTo
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct GetVariablesParams {
     /// Stack frame index (into the active thread's frame list). Omit for the active frame.
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
     pub frame_id: Option<usize>,
 }
 

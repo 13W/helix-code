@@ -6,6 +6,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use super::serde_lenient;
+
 // ── read_file ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -46,8 +48,10 @@ pub struct ReadRangeParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// First line to read, 0-indexed, inclusive
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub start_line: usize,
     /// Last line to read, 0-indexed, inclusive
+    #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub end_line: usize,
 }
 
