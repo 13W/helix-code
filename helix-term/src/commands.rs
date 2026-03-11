@@ -7235,6 +7235,9 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                     (result.session_id, result.config_options)
                 };
 
+                // Fetch account info (best-effort — ignore errors if unsupported).
+                let account_info = handle.account_info().await.ok();
+
                 Ok(job::Callback::Editor(Box::new(
                     move |editor: &mut helix_view::Editor| {
                         if editor.mcp_addr.is_none() {
@@ -7245,6 +7248,19 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                             client.session_id = Some(sid.clone());
                             client.auth_methods = auth_methods;
                             client.config_options = config_options;
+                            if let Some(ref info) = account_info {
+                                let line = match (&info.email, &info.name) {
+                                    (Some(e), Some(n)) => format!("Logged in as: {n} <{e}>"),
+                                    (Some(e), None) => format!("Logged in as: {e}"),
+                                    (None, Some(n)) => format!("Logged in as: {n}"),
+                                    _ => String::new(),
+                                };
+                                if !line.is_empty() {
+                                    client.display.push(helix_acp::DisplayLine::Text(line));
+                                    client.display.push(helix_acp::DisplayLine::Separator);
+                                }
+                            }
+                            client.account_info = account_info;
                         }
                         log::info!("ACP: agent '{name}' ready (session={sid})");
                         editor.set_status(format!("ACP: agent '{name}' ready"));
