@@ -662,7 +662,7 @@ impl EditorView {
     }
 
     /// Render bufferline at the top
-    pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
+    pub fn render_bufferline(editor: &mut Editor, viewport: Rect, surface: &mut Surface) {
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
         surface.clear_with(
             viewport,
@@ -682,58 +682,194 @@ impl EditorView {
             .try_get("ui.bufferline")
             .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
 
-        let mut x = viewport.x;
         let current_doc = view!(editor).doc;
+        let icons = ICONS.load();
 
-        for doc in editor.documents() {
-            let fname = doc
-                .path()
-                .unwrap_or(&scratch)
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
+        // Build list of (fname, modified, icon_str, is_active) for each doc.
+        // We need owned data to avoid holding borrows on `editor` while mutating `bufferline_scroll`.
+        struct TabInfo {
+            fname: String,
+            modified: bool,
+            icon_str: Option<String>,
+            icon_color: Option<Color>,
+            is_active: bool,
+        }
 
-            let style = if current_doc == doc.id() {
+        let tabs: Vec<TabInfo> = editor
+            .documents()
+            .map(|doc| {
+                let fname = doc
+                    .path()
+                    .unwrap_or(&scratch)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
+                let (icon_str, icon_color) = icons
+                    .fs()
+                    .from_optional_path_or_lang(doc.path().map(|p| p.as_path()), lang)
+                    .map(|icon| {
+                        (Some(format!(" {icon}")), icon.color())
+                    })
+                    .unwrap_or((None, None));
+                TabInfo {
+                    fname,
+                    modified: doc.is_modified(),
+                    icon_str,
+                    icon_color,
+                    is_active: current_doc == doc.id(),
+                }
+            })
+            .collect();
+
+        // Compute the rendered width (in terminal columns) for each tab.
+        // Width = icon (if any) + " <fname> " + modified marker
+        let tab_widths: Vec<u16> = tabs
+            .iter()
+            .map(|t| {
+                let icon_w = t.icon_str.as_deref().map(|s| s.chars().count()).unwrap_or(0) as u16;
+                let text = format!(
+                    " {} {}",
+                    t.fname,
+                    if t.modified { "[+] " } else { "" }
+                );
+                let text_w = text.chars().count() as u16;
+                icon_w + text_w
+            })
+            .collect();
+
+        // Find the index of the active buffer.
+        let active_idx = tabs.iter().position(|t| t.is_active).unwrap_or(0);
+
+        // Indicator widths: "< " on the left when scrolled, " >" on the right when overflow.
+        const INDICATOR_W: u16 = 2;
+        let total_width = viewport.width;
+
+        // Adjust scroll so active tab is visible.
+        // We use a two-pass approach:
+        //   1. If active_idx < scroll, set scroll = active_idx.
+        //   2. Otherwise, advance scroll until active tab fits within available width.
+        let mut scroll = editor.bufferline_scroll;
+
+        // Clamp scroll to valid range first.
+        if scroll >= tabs.len() {
+            scroll = tabs.len().saturating_sub(1);
+        }
+
+        // Scroll left if active is before the visible window.
+        if active_idx < scroll {
+            scroll = active_idx;
+        }
+
+        // Check if active fits in the window starting from `scroll`.
+        // We iterate forward, accounting for indicator widths.
+        loop {
+            let left_w = if scroll > 0 { INDICATOR_W } else { 0 };
+            let available = total_width.saturating_sub(left_w);
+            // Reserve right indicator space tentatively; we'll see if we need it.
+            // We'll compute it after we know how many tabs fit.
+            let mut fits_up_to = scroll; // last index that fits (exclusive end)
+            let mut used: u16 = 0;
+            let mut seen_active = false;
+            for idx in scroll..tabs.len() {
+                let w = tab_widths[idx];
+                // Check if we need a right indicator: there are tabs after this one.
+                let more_right = idx + 1 < tabs.len();
+                let right_w = if more_right { INDICATOR_W } else { 0 };
+                if used + w + right_w <= available {
+                    used += w;
+                    fits_up_to = idx + 1;
+                    if idx == active_idx {
+                        seen_active = true;
+                    }
+                } else {
+                    // This tab doesn't fit; but maybe active was already seen.
+                    break;
+                }
+            }
+            if seen_active || fits_up_to > active_idx {
+                break;
+            }
+            // Active not visible; advance scroll by 1.
+            scroll += 1;
+            if scroll > active_idx {
+                scroll = active_idx;
+                break;
+            }
+        }
+
+        editor.bufferline_scroll = scroll;
+
+        // Determine if we need indicators.
+        let has_left = scroll > 0;
+        // Do a final pass to determine right overflow.
+        let left_w = if has_left { INDICATOR_W } else { 0 };
+        let available = total_width.saturating_sub(left_w);
+        let mut used: u16 = 0;
+        let mut last_visible = scroll;
+        for idx in scroll..tabs.len() {
+            let w = tab_widths[idx];
+            let more_right = idx + 1 < tabs.len();
+            let right_w = if more_right { INDICATOR_W } else { 0 };
+            if used + w + right_w <= available {
+                used += w;
+                last_visible = idx + 1;
+            } else {
+                break;
+            }
+        }
+        let has_right = last_visible < tabs.len();
+
+        let mut x = viewport.x;
+
+        // Render left indicator.
+        if has_left {
+            x = surface
+                .set_stringn(x, viewport.y, " <", INDICATOR_W as usize, bufferline_inactive)
+                .0;
+        }
+
+        // Render visible tabs.
+        for idx in scroll..tabs.len() {
+            let t = &tabs[idx];
+            let style = if t.is_active {
                 bufferline_active
             } else {
                 bufferline_inactive
             };
 
-            let icons = ICONS.load();
+            // Check if there's room (leave space for right indicator if needed).
+            // Check if there's room (leave space for right indicator if needed).
+            let right_indicator_w = if has_right { INDICATOR_W } else { 0 };
+            let right_edge = viewport.right().saturating_sub(right_indicator_w);
+            if x >= right_edge {
+                break;
+            }
 
-            let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
-
-            if let Some(icon) = icons
-                .fs()
-                .from_optional_path_or_lang(doc.path().map(|path| path.as_path()), lang)
-            {
-                let used_width = viewport.x.saturating_sub(x);
-                let rem_width = surface.area.width.saturating_sub(used_width);
-
-                let style = icon.color().map_or(style, |color| style.fg(color));
-
-                x = surface
-                    .set_stringn(x, viewport.y, format!(" {icon}"), rem_width as usize, style)
-                    .0;
-
-                if x >= surface.area.right() {
+            if let Some(icon) = &t.icon_str {
+                let rem = right_edge.saturating_sub(x) as usize;
+                let icon_style = t.icon_color.map_or(style, |c| style.fg(c));
+                x = surface.set_stringn(x, viewport.y, icon, rem, icon_style).0;
+                if x >= right_edge {
                     break;
                 }
             }
 
-            let text = format!(" {} {}", fname, if doc.is_modified() { "[+] " } else { "" });
+            let text = format!(
+                " {} {}",
+                t.fname,
+                if t.modified { "[+] " } else { "" }
+            );
+            let rem = right_edge.saturating_sub(x) as usize;
+            x = surface.set_stringn(x, viewport.y, text, rem, style).0;
+        }
 
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
-
-            x = surface
-                .set_stringn(x, viewport.y, text, rem_width as usize, style)
-                .0;
-
-            if x >= surface.area.right() {
-                break;
-            }
+        // Render right indicator.
+        if has_right {
+            let right_x = viewport.right().saturating_sub(INDICATOR_W);
+            surface.set_stringn(right_x, viewport.y, " >", INDICATOR_W as usize, bufferline_inactive);
         }
     }
 

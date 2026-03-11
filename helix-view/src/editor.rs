@@ -1242,6 +1242,8 @@ pub struct Editor {
     pub handlers: Handlers,
 
     pub mouse_down_range: Option<Range>,
+    /// Horizontal scroll offset (doc index) for the buffer line tab bar.
+    pub bufferline_scroll: usize,
     pub cursor_cache: CursorCache,
 }
 
@@ -1368,6 +1370,7 @@ impl Editor {
             needs_redraw: false,
             handlers,
             mouse_down_range: None,
+            bufferline_scroll: 0,
             cursor_cache: CursorCache::default(),
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
         }
