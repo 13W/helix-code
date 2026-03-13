@@ -33,3 +33,6 @@ signal to the Helix process, such as by using the command `pkill -USR1 hx`.
 Finally, you can have a `config.toml` and a `languages.toml` local to a project by putting it under a `.helix` directory in your repository.
 Its settings will be merged with the configuration directory and the built-in configuration.
 
+You can also store debug launch configurations local to a project in a `.helix/launch.toml` file.
+See the [debug launch configurations](#debug-launch-configurations) section in the Languages documentation.
+
