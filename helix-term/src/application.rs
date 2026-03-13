@@ -817,6 +817,24 @@ impl Application {
             .to_string()
     }
 
+    /// Build a truncated diff preview string for MCP approval dialogs.
+    fn mcp_diff_preview(diff: &str) -> String {
+        let truncated: String = diff.lines().take(20).collect::<Vec<_>>().join("\n");
+        let max = truncated.len().min(400);
+        let safe_len = truncated
+            .char_indices()
+            .map(|(i, _)| i)
+            .filter(|&i| i <= max)
+            .last()
+            .unwrap_or(0);
+        if safe_len < diff.len() {
+            format!("{}\u{2026}", &truncated[..safe_len])
+        } else {
+            truncated
+        }
+    }
+
+
     /// Read the current string content of `path` — from the open buffer if available,
     /// otherwise from disk.  Returns an empty string for new (not-yet-existing) files.
     fn mcp_read_content(editor: &helix_view::Editor, path: &std::path::Path) -> String {
@@ -895,35 +913,28 @@ impl Application {
                     return;
                 }
                 use crate::ui::PromptEvent;
-
-                // Show a truncated diff preview in the status bar.
-                let preview_len = diff.len().min(400);
-                // Find a char boundary for safe slicing.
-                let preview_len = diff
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .filter(|&i| i <= preview_len)
-                    .last()
-                    .unwrap_or(0);
-                self.editor
-                    .set_status(format!("{}\n…", &diff[..preview_len]));
-
-                let prompt = ui::Prompt::new(
-                    format!("MCP {tool_name}: apply changes? [y/N]: ").into(),
-                    None,
-                    ui::completers::none,
-                    move |_cx, input, event| {
-                        if event != PromptEvent::Validate {
-                            return;
-                        }
-                        let approved =
-                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                let diff_preview = Self::mcp_diff_preview(&diff);
+                let message = if diff_preview.is_empty() {
+                    format!("MCP {tool_name}: permission required")
+                } else {
+                    format!("MCP {tool_name}: permission required\n\n{diff_preview}")
+                };
+                let select = ui::Select::new(
+                    message,
+                    [McpApproveAction::Apply, McpApproveAction::Cancel],
+                    (),
+                    move |_editor, action, event| {
+                        if event == PromptEvent::Update { return; }
+                        let approved = event == PromptEvent::Validate
+                            && matches!(action, McpApproveAction::Apply);
                         if let Some(tx) = reply.lock().unwrap().take() {
                             let _ = tx.send(approved);
                         }
                     },
-                );
-                self.compositor.replace_or_push("mcp-permission", prompt);
+                )
+                .no_auto_close()
+                .with_id("mcp-permission");
+                self.compositor.replace_or_push("mcp-permission", select);
             }
 
             McpCommand::WriteFile {
@@ -972,67 +983,53 @@ impl Application {
                     let _ = reply.send(result);
                     return;
                 }
-                // Show diff preview in status.
-                let preview_len = diff.len().min(400);
-                let preview_len = diff
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .filter(|&i| i <= preview_len)
-                    .last()
-                    .unwrap_or(0);
-                self.editor.set_status(diff[..preview_len].to_string());
-
+                let diff_preview = Self::mcp_diff_preview(&diff);
+                let message = format!(
+                    "write_file '{}' — {lines_changed} line(s) changed\n\n{diff_preview}",
+                    path.display()
+                );
                 let reply = Arc::new(Mutex::new(Some(reply)));
                 let path2 = path.clone();
                 let content2 = content.clone();
-                let prompt = ui::Prompt::new(
-                    format!(
-                        "MCP write_file '{}': apply {lines_changed} changed line(s)? [y/N]: ",
-                        path.display()
-                    )
-                    .into(),
-                    None,
-                    ui::completers::none,
-                    move |cx, input, event| {
-                        if event != PromptEvent::Validate {
-                            return;
-                        }
-                        let approved =
-                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-                        let result: anyhow::Result<WriteResult> = if approved {
-                            std::fs::write(&path2, &content2)
-                                .map_err(anyhow::Error::from)
-                                .map(|_| {
-                                    if cx.editor.document_by_path(&path2).is_some() {
-                                        Self::reload_document_by_path(cx.editor, &path2);
-                                    } else if cx.editor.mcp_trace {
-                                        if let Err(e) = cx
-                                            .editor
-                                            .open(&path2, helix_view::editor::Action::Load)
-                                        {
-                                            log::warn!(
-                                                "MCP write_file: could not open {}: {e}",
-                                                path2.display()
-                                            );
+                let select = ui::Select::new(
+                    message,
+                    [McpApproveAction::Apply, McpApproveAction::Cancel],
+                    (),
+                    move |editor, action, event| {
+                        if event == PromptEvent::Update { return; }
+                        let result: anyhow::Result<WriteResult> =
+                            if event == PromptEvent::Validate
+                                && matches!(action, McpApproveAction::Apply)
+                            {
+                                std::fs::write(&path2, &content2)
+                                    .map_err(anyhow::Error::from)
+                                    .map(|_| {
+                                        if editor.document_by_path(&path2).is_some() {
+                                            Self::reload_document_by_path(editor, &path2);
+                                        } else if editor.mcp_trace {
+                                            let _ = editor
+                                                .open(&path2, helix_view::editor::Action::Load);
                                         }
-                                    }
-                                    Self::mcp_trace_jump(cx.editor, &path2, 0);
-                                    WriteResult {
-                                        path: path2.clone(),
-                                        lines_changed,
-                                        saved: true,
-                                    }
-                                })
-                        } else {
-                            Err(anyhow::anyhow!("Permission denied by user"))
-                        };
+                                        Self::mcp_trace_jump(editor, &path2, 0);
+                                        WriteResult {
+                                            path: path2.clone(),
+                                            lines_changed,
+                                            saved: true,
+                                        }
+                                    })
+                            } else {
+                                Err(anyhow::anyhow!("Permission denied by user"))
+                            };
                         if let Some(tx) = reply.lock().unwrap().take() {
                             let _ = tx.send(result);
                         }
                     },
-                );
-                self.compositor.replace_or_push("mcp-write", prompt);
+                )
+                .no_auto_close()
+                .with_id("mcp-write");
+                self.compositor.replace_or_push("mcp-write", select);
             }
+
 
             McpCommand::ApplyEdits { path, edits, reply } => {
                 use crate::ui::PromptEvent;
@@ -1143,67 +1140,56 @@ impl Application {
                     let _ = reply.send(result);
                     return;
                 }
-                let preview_len = diff.len().min(400);
-                let preview_len = diff
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .filter(|&i| i <= preview_len)
-                    .last()
-                    .unwrap_or(0);
-                self.editor.set_status(diff[..preview_len].to_string());
-
+                let diff_preview = Self::mcp_diff_preview(&diff);
+                let message = format!(
+                    "edit_file '{}' — {lines_changed} line(s) changed\n\n{diff_preview}",
+                    path.display()
+                );
                 let reply = Arc::new(Mutex::new(Some(reply)));
                 let path2 = path.clone();
                 let content2 = new_content;
                 let trace_target_line2 = trace_target_line;
-                let prompt = ui::Prompt::new(
-                    format!(
-                        "MCP edit_file '{}': apply {lines_changed} changed line(s)? [y/N]: ",
-                        path.display()
-                    )
-                    .into(),
-                    None,
-                    ui::completers::none,
-                    move |cx, input, event| {
-                        if event != PromptEvent::Validate {
-                            return;
-                        }
-                        let approved =
-                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-                        let result: anyhow::Result<WriteResult> = if approved {
-                            std::fs::write(&path2, &content2)
-                                .map_err(anyhow::Error::from)
-                                .map(|_| {
-                                    if cx.editor.document_by_path(&path2).is_some() {
-                                        Self::reload_document_by_path(cx.editor, &path2);
-                                    } else if cx.editor.mcp_trace {
-                                        if let Err(e) = cx
-                                            .editor
-                                            .open(&path2, helix_view::editor::Action::Load)
-                                        {
-                                            log::warn!(
-                                                "MCP edit_file: could not open {}: {e}",
-                                                path2.display()
-                                            );
+                let select = ui::Select::new(
+                    message,
+                    [McpApproveAction::Apply, McpApproveAction::Cancel],
+                    (),
+                    move |editor, action, event| {
+                        if event == PromptEvent::Update { return; }
+                        let result: anyhow::Result<WriteResult> =
+                            if event == PromptEvent::Validate
+                                && matches!(action, McpApproveAction::Apply)
+                            {
+                                std::fs::write(&path2, &content2)
+                                    .map_err(anyhow::Error::from)
+                                    .map(|_| {
+                                        if editor.document_by_path(&path2).is_some() {
+                                            Self::reload_document_by_path(editor, &path2);
+                                        } else if editor.mcp_trace {
+                                            let _ = editor
+                                                .open(&path2, helix_view::editor::Action::Load);
                                         }
-                                    }
-                                    Self::mcp_trace_jump(cx.editor, &path2, trace_target_line2);
-                                    WriteResult {
-                                        path: path2.clone(),
-                                        lines_changed,
-                                        saved: true,
-                                    }
-                                })
-                        } else {
-                            Err(anyhow::anyhow!("Permission denied by user"))
-                        };
+                                        Self::mcp_trace_jump(
+                                            editor, &path2, trace_target_line2,
+                                        );
+                                        WriteResult {
+                                            path: path2.clone(),
+                                            lines_changed,
+                                            saved: true,
+                                        }
+                                    })
+                            } else {
+                                Err(anyhow::anyhow!("Permission denied by user"))
+                            };
                         if let Some(tx) = reply.lock().unwrap().take() {
                             let _ = tx.send(result);
                         }
                     },
-                );
-                self.compositor.replace_or_push("mcp-edit", prompt);
+                )
+                .no_auto_close()
+                .with_id("mcp-edit");
+                self.compositor.replace_or_push("mcp-edit", select);
             }
+
 
             McpCommand::InsertText {
                 path,
@@ -1346,37 +1332,41 @@ impl Application {
                     return;
                 }
                 let reply = Arc::new(Mutex::new(Some(reply)));
-                let prompt = ui::Prompt::new(
-                    format!(
-                        "MCP rename_symbol → '{new_name}': apply {changes_count} edit(s)? [y/N]: ",
-                    )
-                    .into(),
-                    None,
-                    ui::completers::none,
-                    move |cx, input, event| {
-                        if event != PromptEvent::Validate {
+                let message =
+                    format!("rename_symbol \u{2192} '{new_name}' \u{2014} {changes_count} edit(s)");
+                let select = ui::Select::new(
+                    message,
+                    [McpApproveAction::Apply, McpApproveAction::Cancel],
+                    (),
+                    move |editor, action, event| {
+                        if event == PromptEvent::Update {
                             return;
                         }
-                        let approved =
-                            matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-                        let result: anyhow::Result<WriteResult> = if approved {
-                            cx.editor
-                                .apply_workspace_edit(offset_encoding, &workspace_edit)
-                                .map(|_| WriteResult {
-                                    path: path.clone(),
-                                    lines_changed: changes_count,
-                                    saved: false,
-                                })
-                                .map_err(|e| anyhow::anyhow!("apply_workspace_edit failed: {e:?}"))
-                        } else {
-                            Err(anyhow::anyhow!("Permission denied by user"))
-                        };
+                        let result: anyhow::Result<WriteResult> =
+                            if event == PromptEvent::Validate
+                                && matches!(action, McpApproveAction::Apply)
+                            {
+                                editor
+                                    .apply_workspace_edit(offset_encoding, &workspace_edit)
+                                    .map(|_| WriteResult {
+                                        path: path.clone(),
+                                        lines_changed: changes_count,
+                                        saved: false,
+                                    })
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("apply_workspace_edit failed: {e:?}")
+                                    })
+                            } else {
+                                Err(anyhow::anyhow!("Permission denied by user"))
+                            };
                         if let Some(tx) = reply.lock().unwrap().take() {
                             let _ = tx.send(result);
                         }
                     },
-                );
-                self.compositor.replace_or_push("mcp-rename", prompt);
+                )
+                .no_auto_close()
+                .with_id("mcp-rename");
+                self.compositor.replace_or_push("mcp-rename", select);
             }
 
             McpCommand::ReplaceSymbol {
@@ -2886,59 +2876,66 @@ impl Application {
                     return;
                 }
                 let path2 = path.clone();
-                let prompt = crate::ui::Prompt::new(
-                    format!(
-                        "MCP set_breakpoint '{}:{}': apply? [y/N]: ",
-                        path.display(),
-                        line
-                    )
-                    .into(),
-                    None,
-                    crate::ui::completers::none,
-                    move |cx, input, event| {
-                        if event != PromptEvent::Validate {
+                let cond_display = condition
+                    .as_deref()
+                    .map(|c| format!(" [cond: {c}]"))
+                    .unwrap_or_default();
+                let message = format!(
+                    "set_breakpoint '{}:{}'{}" ,
+                    path.display(),
+                    line,
+                    cond_display
+                );
+                let select = ui::Select::new(
+                    message,
+                    [McpApproveAction::Apply, McpApproveAction::Cancel],
+                    (),
+                    move |editor, action, event| {
+                        if event == PromptEvent::Update {
                             return;
                         }
-                        let approved = matches!(
-                            input.trim().to_ascii_lowercase().as_str(),
-                            "y" | "yes"
-                        );
-                        let result: anyhow::Result<helix_mcp::BreakpointInfo> = if approved {
-                            let bp = helix_view::editor::Breakpoint {
-                                line,
-                                condition: condition.clone(),
-                                ..Default::default()
-                            };
-                            let bps =
-                                cx.editor.breakpoints.entry(path2.clone()).or_default();
-                            bps.push(bp);
-                            let idx = bps.len() - 1;
-                            // Sync with active DAP session if one exists.
-                            if let Some(debugger) =
-                                cx.editor.debug_adapters.get_active_client_mut()
+                        let result: anyhow::Result<helix_mcp::BreakpointInfo> =
+                            if event == PromptEvent::Validate
+                                && matches!(action, McpApproveAction::Apply)
                             {
-                                if let Err(e) = helix_view::handlers::dap::breakpoints_changed(
-                                    debugger,
-                                    path2.clone(),
-                                    bps,
-                                ) {
-                                    log::warn!("MCP set_breakpoint: DAP sync error: {e}");
+                                let bp = helix_view::editor::Breakpoint {
+                                    line,
+                                    condition: condition.clone(),
+                                    ..Default::default()
+                                };
+                                let bps =
+                                    editor.breakpoints.entry(path2.clone()).or_default();
+                                bps.push(bp);
+                                let idx = bps.len() - 1;
+                                if let Some(debugger) =
+                                    editor.debug_adapters.get_active_client_mut()
+                                {
+                                    if let Err(e) =
+                                        helix_view::handlers::dap::breakpoints_changed(
+                                            debugger,
+                                            path2.clone(),
+                                            bps,
+                                        )
+                                    {
+                                        log::warn!("MCP set_breakpoint: DAP sync error: {e}");
+                                    }
                                 }
-                            }
-                            let info = Self::bp_to_info(
-                                &path2,
-                                &cx.editor.breakpoints[&path2][idx],
-                            );
-                            Ok(info)
-                        } else {
-                            Err(anyhow::anyhow!("Permission denied by user"))
-                        };
+                                let info = Application::bp_to_info(
+                                    &path2,
+                                    &editor.breakpoints[&path2][idx],
+                                );
+                                Ok(info)
+                            } else {
+                                Err(anyhow::anyhow!("Permission denied by user"))
+                            };
                         if let Some(tx) = reply.lock().unwrap().take() {
                             let _ = tx.send(result);
                         }
                     },
-                );
-                self.compositor.replace_or_push("mcp-set-breakpoint", prompt);
+                )
+                .no_auto_close()
+                .with_id("mcp-set-breakpoint");
+                self.compositor.replace_or_push("mcp-set-breakpoint", select);
             }
 
             McpCommand::RemoveBreakpoint { path, line, reply } => {
@@ -4879,6 +4876,23 @@ impl ui::menu::Item for PermOption {
         match self {
             PermOption::Agent(opt) => opt.name.as_str().into(),
             PermOption::CleanContext { .. } => "Apply (clean context)".into(),
+        }
+    }
+}
+
+/// Two-option enum for MCP write-operation approval popups.
+#[derive(Clone)]
+enum McpApproveAction {
+    Apply,
+    Cancel,
+}
+
+impl ui::menu::Item for McpApproveAction {
+    type Data = ();
+    fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
+        match self {
+            McpApproveAction::Apply  => "Apply".into(),
+            McpApproveAction::Cancel => "Cancel".into(),
         }
     }
 }
