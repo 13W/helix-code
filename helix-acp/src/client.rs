@@ -483,7 +483,10 @@ pub struct AgentConfig {
     /// Arguments passed to the agent process.
     pub args: Vec<String>,
     /// Extra environment variables for the agent process.
+    /// Extra environment variables for the agent process.
     pub env: std::collections::HashMap<String, String>,
+    /// If set, write all ACP JSON-RPC lines to this JSONL file.
+    pub log_path: Option<std::path::PathBuf>,
 }
 
 impl AgentConfig {
@@ -492,9 +495,11 @@ impl AgentConfig {
             command: command.into(),
             args: Vec::new(),
             env: std::collections::HashMap::new(),
+            log_path: None,
         }
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // DisplayLine
@@ -582,6 +587,17 @@ pub struct Client {
     pub account_info: Option<AccountInfo>,
 }
 
+/// Build one JSONL log entry: `{"ts":<unix_ms>,"dir":"<dir>","line":<escaped>}`.
+fn make_log_entry(dir: &str, line: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let trimmed = line.trim_end();
+    let escaped = serde_json::to_string(trimmed).unwrap_or_default();
+    format!(r#"{{"ts":{ts},"dir":"{dir}","line":{escaped}}}"#)
+}
+
 impl Client {
     pub fn start(
         config: &AgentConfig,
@@ -613,7 +629,9 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("agent stderr unavailable"))?;
 
         let name = config.command.clone();
+        let log_path = config.log_path.clone();
         let agent_id = id;
+
 
         let (event_tx, event_rx) = unbounded_channel::<(AgentId, AcpEvent)>();
         let (rpc_tx, rpc_rx) = unbounded_channel::<AgentRpcCall>();
@@ -637,6 +655,39 @@ impl Client {
                         agent_id,
                         event_tx: event_tx_handler,
                     };
+
+                    // --- optional JSONL protocol logger ---
+                    let log_tx_recv: Option<tokio::sync::mpsc::UnboundedSender<String>>;
+                    let log_tx_send: Option<tokio::sync::mpsc::UnboundedSender<String>>;
+                    if let Some(ref path) = log_path {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match tokio::fs::File::create(path).await {
+                            Ok(file) => {
+                                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                                let mut w = tokio::io::BufWriter::new(file);
+                                tokio::task::spawn_local(async move {
+                                    use tokio::io::AsyncWriteExt;
+                                    while let Some(entry) = rx.recv().await {
+                                        let _ = w.write_all(entry.as_bytes()).await;
+                                        let _ = w.write_all(b"\n").await;
+                                        let _ = w.flush().await;
+                                    }
+                                });
+                                log_tx_recv = Some(tx.clone());
+                                log_tx_send = Some(tx);
+                            }
+                            Err(e) => {
+                                log::warn!("ACP: cannot create log file {path:?}: {e}");
+                                log_tx_recv = None;
+                                log_tx_send = None;
+                            }
+                        }
+                    } else {
+                        log_tx_recv = None;
+                        log_tx_send = None;
+                    }
 
                     // Intercept stdout to parse usage_update and per-turn token counts.
                     let (duplex_sdk, duplex_agent) = tokio::io::duplex(64 * 1024);
@@ -673,6 +724,9 @@ impl Client {
                                             },
                                         ));
                                     }
+                                    if let Some(ref tx) = log_tx_recv {
+                                        let _ = tx.send(make_log_entry("recv", &line));
+                                    }
                                     if writer.write_all(bytes).await.is_err() {
                                         break;
                                     }
@@ -697,6 +751,9 @@ impl Client {
                                 Ok(_) => {
                                      let out = rewrite_outgoing_method(&line, "_session/list", "session/list");
                                      let out = rewrite_outgoing_method(&out, "_account/info", "account/info");
+                                    if let Some(ref tx) = log_tx_send {
+                                        let _ = tx.send(make_log_entry("send", &out));
+                                    }
                                     if writer.write_all(out.as_bytes()).await.is_err() {
                                         break;
                                     }
