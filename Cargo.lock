@@ -1882,7 +1882,7 @@ dependencies = [
  "log",
  "parking_lot",
  "serde",
- "sha2",
+ "serde_json",
  "tempfile",
  "threadpool",
  "toml",

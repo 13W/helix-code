@@ -116,6 +116,7 @@
 | `lsp_or_syntax_workspace_symbol_picker` | Open workspace symbol picker from LSP or syntax information | normal: `` <space>S ``, select: `` <space>S `` |
 | `diagnostics_picker` | Open diagnostic picker | normal: `` <space>d ``, select: `` <space>d `` |
 | `workspace_diagnostics_picker` | Open workspace diagnostic picker | normal: `` <space>D ``, select: `` <space>D `` |
+| `pull_workspace_diagnostics` | Pull diagnostics for all workspace files via LSP | normal: `` <space>X ``, select: `` <space>X `` |
 | `last_picker` | Open last picker | normal: `` <space>' ``, select: `` <space>' `` |
 | `insert_at_line_start` | Insert at start of line | normal: `` I ``, select: `` I `` |
 | `insert_at_line_end` | Insert at end of line | normal: `` A ``, select: `` A `` |
@@ -155,6 +156,7 @@
 | `goto_prev_change` | Goto previous change | normal: `` [g ``, select: `` [g `` |
 | `goto_first_change` | Goto first change | normal: `` [G ``, select: `` [G `` |
 | `goto_last_change` | Goto last change | normal: `` ]G ``, select: `` ]G `` |
+| `show_diff_base` | Show VCS diff base for hunk at cursor | normal: `` <space>K ``, select: `` <space>K `` |
 | `goto_line_start` | Goto line start | normal: `` gh ``, `` <home> ``, select: `` gh ``, insert: `` <home> `` |
 | `goto_line_end` | Goto line end | normal: `` gl ``, `` <end> ``, select: `` gl `` |
 | `goto_column` | Goto column | normal: `` g\| `` |
@@ -223,6 +225,7 @@
 | `rotate_selection_contents_backward` | Rotate selections contents backward | normal: `` <A-(> ``, select: `` <A-(> `` |
 | `reverse_selection_contents` | Reverse selections contents |  |
 | `expand_selection` | Expand selection to parent syntax node | normal: `` <A-o> ``, `` <A-up> ``, select: `` <A-o> ``, `` <A-up> `` |
+| `lsp_expand_selection` | Expand selection to enclosing LSP structural range | normal: `` <A-O> ``, select: `` <A-O> `` |
 | `shrink_selection` | Shrink selection to previously expanded syntax node | normal: `` <A-i> ``, `` <A-down> ``, select: `` <A-i> ``, `` <A-down> `` |
 | `select_next_sibling` | Select next sibling in the syntax tree | normal: `` <A-n> ``, `` <A-right> ``, select: `` <A-n> ``, `` <A-right> `` |
 | `select_prev_sibling` | Select previous sibling the in syntax tree | normal: `` <A-p> ``, `` <A-left> ``, select: `` <A-p> ``, `` <A-left> `` |
@@ -280,6 +283,7 @@
 | `goto_next_paragraph` | Goto next paragraph | normal: `` ]p ``, select: `` ]p `` |
 | `goto_prev_paragraph` | Goto previous paragraph | normal: `` [p ``, select: `` [p `` |
 | `dap_launch` | Launch debug target | normal: `` <space>Gl ``, select: `` <space>Gl `` |
+| `dap_run_config` | Launch debug target from project launch config | normal: `` <space>GL ``, select: `` <space>GL `` |
 | `dap_restart` | Restart debugging session | normal: `` <space>Gr ``, select: `` <space>Gr `` |
 | `dap_toggle_breakpoint` | Toggle breakpoint | normal: `` <space>Gb ``, select: `` <space>Gb `` |
 | `dap_continue` | Continue program execution | normal: `` <space>Gc ``, select: `` <space>Gc `` |
@@ -313,3 +317,6 @@
 | `goto_prev_tabstop` | Goto next snippet placeholder |  |
 | `rotate_selections_first` | Make the first selection your primary one |  |
 | `rotate_selections_last` | Make the last selection your primary one |  |
+| `agent_toggle_panel` | Toggle the agent panel (starts agent on first open) | normal: `` <A-g> ``, select: `` <A-g> `` |
+| `session_picker` | Open Claude session picker (Alt+Shift+S) | normal: `` <A-G> ``, select: `` <A-G> `` |
+| `toggle_mcp_trace` | Toggle MCP trace mode (jump cursor to edit location on write/edit) | normal: `` <A-t> ``, select: `` <A-t> `` |

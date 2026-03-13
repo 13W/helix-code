@@ -344,6 +344,12 @@ impl Loader {
         })
     }
 
+    /// Find LanguageConfiguration by language_id (e.g. "rust", "go", "javascript").
+    pub fn language_config_for_name(&self, name: &str) -> Option<&LanguageConfiguration> {
+        self.language_configs().find(|c| c.language_id == name)
+    }
+
+
     pub fn language_for_scope(&self, scope: &str) -> Option<Language> {
         self.languages.iter().enumerate().find_map(|(idx, config)| {
             (scope == config.config.scope).then_some(Language(idx as u32))
