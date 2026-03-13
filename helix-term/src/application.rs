@@ -1213,6 +1213,100 @@ impl Application {
                 .await;
             }
 
+
+            McpCommand::PatchFile {
+                path,
+                old_string,
+                new_string,
+                start_line,
+                end_line,
+                replace_all,
+                reply,
+            } => {
+                let old = Self::mcp_read_content(&self.editor, &path);
+
+                let apply_result: anyhow::Result<String> = (|| {
+                    match old_string {
+                        Some(find) => {
+                            // When a line range is given, verify the match exists within it.
+                            let in_scope = if start_line.is_some() || end_line.is_some() {
+                                let lines: Vec<&str> = old.lines().collect();
+                                let n = lines.len();
+                                let s = start_line
+                                    .map(|l| l.saturating_sub(1).min(n))
+                                    .unwrap_or(0);
+                                let e = end_line
+                                    .map(|l| l.saturating_sub(1).min(n))
+                                    .unwrap_or(n);
+                                lines[s..e].join("\n").contains(find.as_str())
+                            } else {
+                                old.contains(find.as_str())
+                            };
+                            if !in_scope {
+                                anyhow::bail!(
+                                    "old_string not found{}",
+                                    if start_line.is_some() {
+                                        " within the specified line range"
+                                    } else {
+                                        " in the file"
+                                    }
+                                );
+                            }
+                            // Replace first or all occurrences in the full file.
+                            if replace_all {
+                                Ok(old.replace(find.as_str(), &new_string))
+                            } else {
+                                Ok(old.replacen(find.as_str(), &new_string, 1))
+                            }
+                        }
+                        None => {
+                            // Pure line-range replacement.
+                            let mut lines: Vec<String> =
+                                old.lines().map(String::from).collect();
+                            if lines.is_empty() {
+                                lines.push(String::new());
+                            }
+                            let n = lines.len();
+                            let s = start_line
+                                .unwrap_or(1)
+                                .saturating_sub(1)
+                                .min(n);
+                            let e = end_line
+                                .unwrap_or(usize::MAX)
+                                .saturating_sub(1)
+                                .min(n)
+                                .max(s);
+                            let replacement: Vec<String> = if new_string.is_empty() {
+                                vec![]
+                            } else {
+                                new_string.lines().map(String::from).collect()
+                            };
+                            lines.splice(s..e, replacement);
+                            let mut new_content = lines.join("\n");
+                            if old.ends_with('\n') && !new_content.ends_with('\n') {
+                                new_content.push('\n');
+                            }
+                            Ok(new_content)
+                        }
+                    }
+                })();
+
+                match apply_result {
+                    Ok(new_content) => {
+                        // Re-dispatch as WriteFile to reuse diff-preview + approval UI.
+                        Box::pin(self.handle_mcp_command(McpCommand::WriteFile {
+                            path,
+                            content: new_content,
+                            reply,
+                        }))
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+
             McpCommand::RenameSymbol {
                 path,
                 line,

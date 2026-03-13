@@ -128,6 +128,15 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
+    #[rmcp::tool(description = "Find-and-replace an exact string in a file, replace a line range, or both. Shows diff and requires user approval. Params: old_string (exact text to find), new_string (replacement, required), start_line/end_line (1-indexed scope or range).")]
+    async fn patch_file(
+        &self,
+        params: Parameters<tools::write::PatchFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::write::handle_patch_file(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
     #[rmcp::tool(description = "Rename a symbol at the given file position via LSP. Applies workspace-wide edits after user approval.")]
     async fn rename_symbol(
         &self,
