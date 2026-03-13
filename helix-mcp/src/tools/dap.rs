@@ -259,9 +259,19 @@ pub async fn handle_get_scopes(params: GetScopesParams) -> anyhow::Result<CallTo
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct GetVariablesParams {
-    /// Stack frame index (into the active thread's frame list). Omit for the active frame.
+    /// `variables_ref` from a scope returned by `get_scopes`.
+    /// Required when `frame_id` is not provided.
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
+    pub variables_ref: Option<usize>,
+    /// If set, auto-resolve the correct scope ref via `get_scopes` instead of
+    /// using `variables_ref` directly. The first scope whose name contains
+    /// `scope_name` (case-insensitive) is selected; falls back to the first
+    /// scope when no name matches.
     #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
     pub frame_id: Option<usize>,
+    /// Scope name substring to match when `frame_id` is provided.
+    /// Defaults to `"local"`. Example: pass `"register"` to get CPU registers.
+    pub scope_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -274,9 +284,36 @@ struct VariableJson {
 
 pub async fn handle_get_variables(params: GetVariablesParams) -> anyhow::Result<CallToolResult> {
     let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+
+    let resolved_ref = if let Some(frame_id) = params.frame_id {
+        // Auto-resolve: fetch scopes for the frame, then pick the matching one.
+        let (scope_tx, scope_rx) = tokio::sync::oneshot::channel();
+        tx.send(McpCommand::GetScopes { frame_id, reply: scope_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+        let scopes = scope_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+        let target = params
+            .scope_name
+            .as_deref()
+            .unwrap_or("local")
+            .to_lowercase();
+        scopes
+            .iter()
+            .find(|s| s.name.to_lowercase().contains(&target))
+            .or_else(|| scopes.first())
+            .map(|s| s.variables_ref)
+            .ok_or_else(|| anyhow::anyhow!("no scopes available for frame {frame_id}"))?
+    } else {
+        params
+            .variables_ref
+            .ok_or_else(|| anyhow::anyhow!("either variables_ref or frame_id is required"))?
+    };
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(McpCommand::GetVariables {
-        frame_id: params.frame_id,
+        variables_ref: resolved_ref,
         reply: reply_tx,
     })
     .await
@@ -370,6 +407,97 @@ pub async fn handle_dap_step_out() -> anyhow::Result<CallToolResult> {
     let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(McpCommand::DapStepOut { reply: reply_tx })
+        .await
+        .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+    reply_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
+}
+
+// ---------------------------------------------------------------------------
+// dap_list_templates
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct DapParamInfoJson {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DapTemplateInfoJson {
+    name: String,
+    request: String,
+    params: Vec<DapParamInfoJson>,
+}
+
+pub async fn handle_dap_list_templates() -> anyhow::Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(McpCommand::DapListTemplates { reply: reply_tx })
+        .await
+        .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+    let templates = reply_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let json_items: Vec<DapTemplateInfoJson> = templates
+        .into_iter()
+        .map(|t| DapTemplateInfoJson {
+            name: t.name,
+            request: t.request,
+            params: t.params.into_iter().map(|p| DapParamInfoJson {
+                name: p.name,
+                completion: p.completion,
+                default: p.default,
+            }).collect(),
+        })
+        .collect();
+    Ok(CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&json_items)?,
+    )]))
+}
+
+// ---------------------------------------------------------------------------
+// dap_launch
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DapLaunchParams {
+    /// Template name from `dap_list_templates`. Omit to use the first template.
+    pub template_name: Option<String>,
+    /// Positional parameter values in order (e.g. `["./target/debug/myapp"]`).
+    #[serde(default)]
+    pub params: Vec<String>,
+}
+
+pub async fn handle_dap_launch(params: DapLaunchParams) -> anyhow::Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(McpCommand::DapLaunch {
+        template_name: params.template_name,
+        params: params.params,
+        reply: reply_tx,
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+    reply_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
+}
+
+// ---------------------------------------------------------------------------
+// dap_terminate
+// ---------------------------------------------------------------------------
+
+pub async fn handle_dap_terminate() -> anyhow::Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(McpCommand::DapTerminate { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
     reply_rx

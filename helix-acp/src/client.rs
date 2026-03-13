@@ -98,7 +98,7 @@ enum AgentRpcCall {
     LoadSession {
         session_id: SessionId,
         mcp_addr: Option<std::net::SocketAddr>,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<LoadSessionResult>>,
     },
     Prompt {
         session_id: SessionId,
@@ -312,7 +312,7 @@ async fn rpc_actor(
                         ]);
                     }
                     let result = conn.load_session(req).await
-                        .map(|_| ())
+                        .map(|resp| LoadSessionResult { config_options: resp.config_options.unwrap_or_default() })
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
                     let _ = reply.send(result);
                 }
@@ -575,9 +575,9 @@ pub struct Client {
     pub config_options: Vec<sdk::SessionConfigOption>,
     /// Pending (option_id, value) to apply via `session_set_config_option` from the UI.
     pub pending_config_change: Option<(String, String)>,
-    /// Plan text waiting to be applied in a new clean-context session.
-    /// Plan text waiting to be applied in a new clean-context session.
-    pub pending_clean_context_plan: Option<String>,
+    /// Pending reply channel + allow_always_id for a deferred "clean context" permission response.
+    /// Set by the permission dialog; consumed by the main loop to send /clear then reply.
+    pub pending_clean_context_reply: Option<(ReplyChannel<sdk::RequestPermissionResponse>, String)>,
     /// Authenticated user info, fetched after `authenticate()` + `session_new()` succeed.
     pub account_info: Option<AccountInfo>,
 }
@@ -762,7 +762,7 @@ impl Client {
             pending_command: None,
             config_options: Vec::new(),
             pending_config_change: None,
-            pending_clean_context_plan: None,
+            pending_clean_context_reply: None,
             account_info: None,
         };
 
@@ -807,10 +807,11 @@ impl Client {
         &mut self,
         session_id: SessionId,
         mcp_addr: Option<std::net::SocketAddr>,
-    ) -> Result<()> {
-        self.handle().session_load(session_id.clone(), mcp_addr).await?;
+    ) -> Result<LoadSessionResult> {
+        let result = self.handle().session_load(session_id.clone(), mcp_addr).await?;
         self.session_id = Some(session_id);
-        Ok(())
+        self.config_options = result.config_options.clone();
+        Ok(result)
     }
 
     pub async fn session_prompt(
@@ -937,7 +938,7 @@ impl ClientHandle {
         &self,
         session_id: SessionId,
         mcp_addr: Option<std::net::SocketAddr>,
-    ) -> Result<()> {
+    ) -> Result<LoadSessionResult> {
         self.call(|reply| AgentRpcCall::LoadSession { session_id, mcp_addr, reply }).await
     }
 
