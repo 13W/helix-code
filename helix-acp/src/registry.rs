@@ -3,7 +3,7 @@
 //! `Registry` manages all running ACP agents and merges their incoming message
 //! streams into a single channel that the application can poll in its event loop.
 
-use crate::{client::{AgentConfig, AcpEvent}, Client, AgentId, Result};
+use crate::{client::AcpEvent, AgentConfig, Client, AgentId, Result};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};

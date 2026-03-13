@@ -4,7 +4,7 @@
 //! allowing the SDK's `!Send` connection types to work correctly.  The helix
 //! main loop communicates with the LocalSet via ordinary mpsc channels.
 
-use crate::{types::*, AgentId, Error, Result};
+use helix_acp_types::*;
 use agent_client_protocol as sdk;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,10 @@ use tokio::{
     },
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+use crate::handler::HelixClientHandler;
+use crate::rpc::{AgentRpcCall, rpc_actor, try_parse_usage_update, try_parse_turn_tokens,
+                 rewrite_outgoing_method};
 
 // ---------------------------------------------------------------------------
 // Public: AcpEvent
@@ -65,482 +69,27 @@ pub enum AcpEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Public: ListedSession — result of a `session/list` ACP call
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Public: ListedSession — result of a `session/list` ACP call
+// SDK-typed results (stay in helix-acp due to sdk dep)
 // ---------------------------------------------------------------------------
 
-/// A session entry returned by the ACP `session/list` extension method.
+/// Result of a successful `session/new` call.
 #[derive(Debug, Clone)]
-pub struct ListedSession {
-    pub session_id: String,
-    pub title: String,
-    pub cwd: String,
-    pub updated_at: String,
-}
-// ---------------------------------------------------------------------------
-
-enum AgentRpcCall {
-    Initialize {
-        reply: oneshot::Sender<Result<InitializeResult>>,
-    },
-    Authenticate {
-        params: AuthenticateParams,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    NewSession {
-        cwd: String,
-        /// Address of the Helix MCP server to pass to the agent, if running.
-        mcp_addr: Option<std::net::SocketAddr>,
-        reply: oneshot::Sender<Result<NewSessionResult>>,
-    },
-    LoadSession {
-        session_id: SessionId,
-        mcp_addr: Option<std::net::SocketAddr>,
-        reply: oneshot::Sender<Result<LoadSessionResult>>,
-    },
-    Prompt {
-        session_id: SessionId,
-        prompt: Vec<ContentBlock>,
-        reply: oneshot::Sender<Result<StopReason>>,
-    },
-    Cancel {
-        session_id: SessionId,
-    },
-    SetMode {
-        session_id: SessionId,
-        mode: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    SetConfigOption {
-        session_id: SessionId,
-        option_id: String,
-        value: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    ListSessions {
-        cwd: Option<String>,
-        reply: oneshot::Sender<Result<Vec<ListedSession>>>,
-    },
-    AccountInfo {
-        reply: oneshot::Sender<Result<AccountInfo>>,
-    },
+pub struct NewSessionResult {
+    pub session_id: SessionId,
+    /// Configuration options (model, mode, …) received in the `session/new` response.
+    pub config_options: Vec<sdk::SessionConfigOption>,
 }
 
-// ---------------------------------------------------------------------------
-// HelixClientHandler — implements sdk::Client for agent → client calls
-// ---------------------------------------------------------------------------
-
-struct HelixClientHandler {
-    agent_id: AgentId,
-    event_tx: UnboundedSender<(AgentId, AcpEvent)>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl sdk::Client for HelixClientHandler {
-    async fn session_notification(&self, args: sdk::SessionNotification) -> sdk::Result<()> {
-        let _ = self
-            .event_tx
-            .send((self.agent_id, AcpEvent::SessionNotification(args)));
-        Ok(())
-    }
-
-    async fn request_permission(
-        &self,
-        args: sdk::RequestPermissionRequest,
-    ) -> sdk::Result<sdk::RequestPermissionResponse> {
-        let (tx, rx) = oneshot::channel();
-        let reply = Arc::new(Mutex::new(Some(tx)));
-        let _ = self.event_tx.send((
-            self.agent_id,
-            AcpEvent::RequestPermission { params: args, reply },
-        ));
-        rx.await.map_err(|_| sdk::Error::internal_error())
-    }
-
-    async fn read_text_file(
-        &self,
-        args: sdk::ReadTextFileRequest,
-    ) -> sdk::Result<sdk::ReadTextFileResponse> {
-        let (tx, rx) = oneshot::channel();
-        let reply = Arc::new(Mutex::new(Some(tx)));
-        let _ = self.event_tx.send((
-            self.agent_id,
-            AcpEvent::ReadTextFile { params: args, reply },
-        ));
-        rx.await.map_err(|_| sdk::Error::internal_error())
-    }
-
-    async fn write_text_file(
-        &self,
-        args: sdk::WriteTextFileRequest,
-    ) -> sdk::Result<sdk::WriteTextFileResponse> {
-        let (tx, rx) = oneshot::channel();
-        let reply = Arc::new(Mutex::new(Some(tx)));
-        let _ = self.event_tx.send((
-            self.agent_id,
-            AcpEvent::WriteTextFile { params: args, reply },
-        ));
-        rx.await.map_err(|_| sdk::Error::internal_error())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// rpc_actor — runs in LocalSet; bridges AgentRpcCall → SDK calls
-// ---------------------------------------------------------------------------
-
-fn try_parse_usage_update(line: &[u8]) -> Option<(u64, u64, f64, String)> {
-    let v: serde_json::Value = serde_json::from_slice(line).ok()?;
-    if v.get("method")?.as_str()? != "session/update" {
-        return None;
-    }
-    let update = v.get("params")?.get("update")?;
-    if update.get("sessionUpdate")?.as_str()? != "usage_update" {
-        return None;
-    }
-    let used = update.get("used")?.as_u64()?;
-    let size = update.get("size")?.as_u64()?;
-    let cost = update.get("cost")?;
-    let amount = cost.get("amount")?.as_f64()?;
-    let currency = cost.get("currency")?.as_str()?.to_string();
-    Some((used, size, amount, currency))
-}
-
-fn try_parse_turn_tokens(line: &[u8]) -> Option<(u64, u64)> {
-    let v: serde_json::Value = serde_json::from_slice(line).ok()?;
-    v.get("id")?; // must be a response (has id)
-    let usage = v.get("result")?.get("usage")?;
-    let input = usage.get("inputTokens")?.as_u64()?;
-    let output = usage.get("outputTokens")?.as_u64()?;
-    Some((input, output))
-}
-
-// Rewrite outgoing JSON-RPC method names that claude-code-acp exposes without
-// the `_` prefix required by the ACP extension-method spec.
-// Returns the rewritten line (owned) only when a rewrite was performed.
-fn rewrite_outgoing_method<'a>(line: &'a str, from: &str, to: &str) -> std::borrow::Cow<'a, str> {
-    if !line.contains(from) {
-        return std::borrow::Cow::Borrowed(line);
-    }
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
-        if v.get("method").and_then(|m| m.as_str()) == Some(from) {
-            v["method"] = serde_json::Value::String(to.to_string());
-            let mut s = v.to_string();
-            s.push('\n');
-            return std::borrow::Cow::Owned(s);
-        }
-    }
-    std::borrow::Cow::Borrowed(line)
-}
-async fn rpc_actor(
-    conn: Rc<sdk::ClientSideConnection>,
-    mut rpc_rx: UnboundedReceiver<AgentRpcCall>,
-    event_tx: UnboundedSender<(AgentId, AcpEvent)>,
-    agent_id: AgentId,
-) {
-    use sdk::Agent as _;
-
-    while let Some(call) = rpc_rx.recv().await {
-        let conn = Rc::clone(&conn);
-        let event_tx = event_tx.clone();
-        tokio::task::spawn_local(async move {
-            match call {
-                AgentRpcCall::Initialize { reply } => {
-                    let req = sdk::InitializeRequest::new(sdk::ProtocolVersion::LATEST)
-                        .client_capabilities(
-                            sdk::ClientCapabilities::new()
-                                .fs(sdk::FileSystemCapabilities::new()
-                                    .read_text_file(true)
-                                    .write_text_file(true))
-                                .terminal(false),
-                        )
-                        .client_info(
-                            sdk::Implementation::new("helix", env!("CARGO_PKG_VERSION"))
-                                .title("Helix Editor".to_owned()),
-                        );
-                    let result = conn.initialize(req).await
-                        .map(convert_init_response)
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::Authenticate { params, reply } => {
-                    let method_id = params
-                        .extra
-                        .get("methodId")
-                        .or_else(|| params.extra.get("method"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default")
-                        .to_owned();
-                    let req = sdk::AuthenticateRequest::new(method_id);
-                    let result = conn.authenticate(req).await
-                        .map(|_| ())
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::NewSession { cwd, mcp_addr, reply } => {
-                    let mut req = sdk::NewSessionRequest::new(std::path::PathBuf::from(cwd));
-                    if let Some(addr) = mcp_addr {
-                        req = req.mcp_servers(vec![
-                            sdk::McpServer::Http(sdk::McpServerHttp::new(
-                                "helix",
-                                format!("http://{addr}/mcp"),
-                            )),
-                        ]);
-                    }
-                    let result = conn.new_session(req).await
-                        .map(|resp| NewSessionResult {
-                            session_id: resp.session_id.to_string(),
-                            config_options: resp.config_options.unwrap_or_default(),
-                        })
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::LoadSession { session_id, mcp_addr, reply } => {
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let mut req = sdk::LoadSessionRequest::new(session_id, cwd);
-                    if let Some(addr) = mcp_addr {
-                        req = req.mcp_servers(vec![
-                            sdk::McpServer::Http(sdk::McpServerHttp::new(
-                                "helix",
-                                format!("http://{addr}/mcp"),
-                            )),
-                        ]);
-                    }
-                    let result = conn.load_session(req).await
-                        .map(|resp| LoadSessionResult { config_options: resp.config_options.unwrap_or_default() })
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::Prompt { session_id, prompt, reply } => {
-                    let sdk_prompt = prompt.into_iter().map(to_sdk_content_block).collect();
-                    let req = sdk::PromptRequest::new(session_id, sdk_prompt);
-                    let result = conn.prompt(req).await;
-                    if let Ok(ref resp) = result {
-                        if let Some(ref usage) = resp.usage {
-                            let _ = event_tx.send((agent_id, AcpEvent::TurnTokens {
-                                input_tokens: usage.input_tokens,
-                                output_tokens: usage.output_tokens,
-                            }));
-                        }
-                    }
-                    let result = result
-                        .map(|resp| convert_stop_reason(resp.stop_reason))
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::Cancel { session_id } => {
-                    let notif = sdk::CancelNotification::new(session_id);
-                    let _ = conn.cancel(notif).await;
-                }
-
-                AgentRpcCall::SetMode { session_id, mode, reply } => {
-                    let req = sdk::SetSessionModeRequest::new(session_id, mode);
-                    let result = conn.set_session_mode(req).await
-                        .map(|_| ())
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::SetConfigOption { session_id, option_id, value, reply } => {
-                    let req = sdk::SetSessionConfigOptionRequest::new(session_id, option_id, value);
-                    let result = conn.set_session_config_option(req).await;
-                    if let Ok(ref resp) = result {
-                        let _ = event_tx.send((agent_id, AcpEvent::ConfigOptionsUpdate(
-                            resp.config_options.clone(),
-                        )));
-                    }
-                    let result = result
-                        .map(|_| ())
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::ListSessions { cwd, reply } => {
-                    use sdk::Agent as _;
-                    let params_json = if let Some(ref dir) = cwd {
-                        serde_json::json!({ "cwd": dir })
-                    } else {
-                        serde_json::json!({})
-                    };
-                    let raw = serde_json::value::RawValue::from_string(params_json.to_string())
-                        .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
-                    let req = sdk::ExtRequest::new("session/list", std::sync::Arc::from(raw));
-                    let result = conn.ext_method(req).await
-                        .map(|resp| {
-                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
-                                .unwrap_or_default();
-                            v["sessions"].as_array().map(|arr| {
-                                arr.iter().filter_map(|s| Some(ListedSession {
-                                    session_id: s["sessionId"].as_str()?.to_owned(),
-                                    title: s["title"].as_str().unwrap_or("").to_owned(),
-                                    cwd: s["cwd"].as_str().unwrap_or("").to_owned(),
-                                    updated_at: s["updatedAt"].as_str().unwrap_or("").to_owned(),
-                                })).collect()
-                            }).unwrap_or_default()
-                        })
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-
-                AgentRpcCall::AccountInfo { reply } => {
-                    use sdk::Agent as _;
-                    let raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
-                    let req = sdk::ExtRequest::new("account/info", std::sync::Arc::from(raw));
-                    let result = conn.ext_method(req).await
-                        .map(|resp| {
-                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
-                                .unwrap_or_default();
-                            AccountInfo {
-                                email: v["emailAddress"].as_str()
-                                    .or_else(|| v["email"].as_str())
-                                    .map(str::to_owned),
-                                name: v["name"].as_str()
-                                    .or_else(|| v["displayName"].as_str())
-                                    .map(str::to_owned),
-                                account_uuid: v["accountUuid"].as_str()
-                                    .or_else(|| v["id"].as_str())
-                                    .map(str::to_owned),
-                            }
-                        })
-                        .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
-                    let _ = reply.send(result);
-                }
-            }
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Type conversion helpers
-// ---------------------------------------------------------------------------
-
-fn to_sdk_content_block(cb: ContentBlock) -> sdk::ContentBlock {
-    match cb {
-        ContentBlock::Text { text } => sdk::ContentBlock::Text(sdk::TextContent::new(text)),
-        // Fallback for non-text blocks — these are not used in current prompts
-        _ => sdk::ContentBlock::Text(sdk::TextContent::new("[unsupported content block]")),
-    }
-}
-
-fn convert_stop_reason(r: sdk::StopReason) -> StopReason {
-    match r {
-        sdk::StopReason::EndTurn => StopReason::EndTurn,
-        sdk::StopReason::MaxTokens => StopReason::MaxTokens,
-        sdk::StopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
-        sdk::StopReason::Refusal => StopReason::Refusal,
-        sdk::StopReason::Cancelled => StopReason::Cancelled,
-        _ => StopReason::EndTurn,
-    }
-}
-
-fn convert_init_response(resp: sdk::InitializeResponse) -> InitializeResult {
-    let caps = resp.agent_capabilities;
-    InitializeResult {
-        protocol_version: caps.load_session as u16, // placeholder, not used
-        capabilities: AgentCapabilities {
-            load_session: Some(caps.load_session),
-            prompt_capabilities: Some(PromptCapabilities {
-                audio: caps.prompt_capabilities.audio,
-                image: caps.prompt_capabilities.image,
-                embedded_context: caps.prompt_capabilities.embedded_context,
-            }),
-            mcp_capabilities: None,
-            session_capabilities: None,
-        },
-        agent_info: resp.agent_info.map(|i| AgentInfo {
-            name: i.name,
-            title: i.title,
-            version: Some(i.version),
-        }),
-        auth_methods: resp
-            .auth_methods
-            .into_iter()
-            .map(|m| AuthMethod {
-                id: m.id().to_string(),
-                name: m.name().to_owned(),
-                description: m.description().map(|s| s.to_owned()),
-            })
-            .collect(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-/// Configuration for launching an ACP agent.
+/// Result of a successful `session/load` call.
 #[derive(Debug, Clone)]
-pub struct AgentConfig {
-    /// Binary name or absolute path.
-    pub command: String,
-    /// Arguments passed to the agent process.
-    pub args: Vec<String>,
-    /// Extra environment variables for the agent process.
-    /// Extra environment variables for the agent process.
-    pub env: std::collections::HashMap<String, String>,
-    /// If set, write all ACP JSON-RPC lines to this JSONL file.
-    pub log_path: Option<std::path::PathBuf>,
-}
-
-impl AgentConfig {
-    pub fn new(command: impl Into<String>) -> Self {
-        AgentConfig {
-            command: command.into(),
-            args: Vec::new(),
-            env: std::collections::HashMap::new(),
-            log_path: None,
-        }
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// DisplayLine
-// ---------------------------------------------------------------------------
-
-/// A single entry in the agent panel display buffer.
-#[derive(Debug, Clone)]
-pub enum DisplayLine {
-    /// Normal assistant text (may span multiple physical lines).
-    Text(String),
-    /// Internal thought chain — rendered dimmed.
-    Thought(String),
-    /// Tool call started: shows tool name while in progress.
-    ToolCall { id: String, name: String, input: String, output: Vec<String> },
-    /// Tool call finished — replaces the matching `ToolCall` entry in-place.
-    ToolDone { id: String, name: String, input: String, status: String, output: Vec<String> },
-    /// Plan step from a `PlanUpdate`.
-    PlanStep { done: bool, description: String },
-    /// Visual divider between conversation turns.
-    Separator,
-    /// The text the user sent — echoed in the panel.
-    UserMessage(String),
+pub struct LoadSessionResult {
+    /// Configuration options (model, mode, …) received in the `session/load` response.
+    pub config_options: Vec<sdk::SessionConfigOption>,
 }
 
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
-/// Accumulated token and cost statistics for the current session.
-#[derive(Debug, Default)]
-pub struct SessionUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_amount: f64,
-    pub currency: String,
-    /// Context window tokens used (from UsageUpdate).
-    pub context_used: u64,
-    /// Context window total size (from UsageUpdate).
-    pub context_size: u64,
-    /// Cumulative sum of `used` from all UsageUpdate events.
-    pub total_used: u64,
-}
 
 /// An ACP agent client connected via stdio.
 #[derive(Debug)]
@@ -631,7 +180,6 @@ impl Client {
         let name = config.command.clone();
         let log_path = config.log_path.clone();
         let agent_id = id;
-
 
         let (event_tx, event_rx) = unbounded_channel::<(AgentId, AcpEvent)>();
         let (rpc_tx, rpc_rx) = unbounded_channel::<AgentRpcCall>();
@@ -749,8 +297,10 @@ impl Client {
                             match reader.read_line(&mut line).await {
                                 Ok(0) => break,
                                 Ok(_) => {
-                                     let out = rewrite_outgoing_method(&line, "_session/list", "session/list");
-                                     let out = rewrite_outgoing_method(&out, "_account/info", "account/info");
+                                    let out = rewrite_outgoing_method(
+                                        &line, "_session/list", "session/list");
+                                    let out = rewrite_outgoing_method(
+                                        &out, "_account/info", "account/info");
                                     if let Some(ref tx) = log_tx_send {
                                         let _ = tx.send(make_log_entry("send", &out));
                                     }
