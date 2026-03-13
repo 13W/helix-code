@@ -2476,6 +2476,21 @@ fn open_workspace_config(
     Ok(())
 }
 
+fn open_launch_config(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    cx.editor
+        .open(&helix_loader::workspace_launch_file(), Action::Replace)?;
+    Ok(())
+}
+
+
 fn open_log(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
@@ -4073,6 +4088,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Open the workspace config.toml file.",
         fun: open_workspace_config,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "config-open-launch",
+        aliases: &[],
+        doc: "Open the workspace debug launch config file (.helix/launch.toml).",
+        fun: open_launch_config,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),

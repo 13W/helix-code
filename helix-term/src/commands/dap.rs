@@ -915,3 +915,127 @@ pub fn dap_switch_stack_frame(cx: &mut Context) {
     });
     cx.push_layer(Box::new(picker))
 }
+
+pub fn dap_start_with_entry(
+    cx: &mut compositor::Context,
+    entry: &helix_loader::LaunchEntry,
+) -> Result<(), anyhow::Error> {
+    let loader = cx.editor.syn_loader.load();
+    let lang_config = loader
+        .language_config_for_name(&entry.language)
+        .ok_or_else(|| anyhow!("No language config for '{}'", entry.language))?;
+    let config = lang_config
+        .debugger
+        .as_ref()
+        .ok_or_else(|| anyhow!("No debug adapter for language '{}'", entry.language))?;
+
+    let id = cx
+        .editor
+        .debug_adapters
+        .start_client(None, config)
+        .map_err(|e| anyhow!("Failed to start debug client: {}", e))?;
+
+    let template = config
+        .templates
+        .iter()
+        .find(|t| t.name == entry.template)
+        .ok_or_else(|| {
+            anyhow!(
+                "No template '{}' for language '{}'",
+                entry.template,
+                entry.language
+            )
+        })?;
+
+    let cow_params: Vec<std::borrow::Cow<str>> =
+        entry.args.iter().map(|s| s.as_str().into()).collect();
+    let preprocessed = prepare_dap_params(template, &cow_params);
+
+    let mut args: HashMap<&str, Value> = template
+        .args
+        .iter()
+        .map(|(k, v)| (k.as_str(), map_value(v, &preprocessed)))
+        .collect();
+
+    for (k, v) in &entry.extra {
+        args.insert(k.as_str(), v.clone());
+    }
+    args.insert("cwd", to_value(helix_stdx::env::current_working_dir())?);
+    let args = to_value(args).unwrap();
+
+    let callback = |_editor: &mut Editor, _compositor: &mut Compositor, _response: Value| {};
+
+    let debugger = cx
+        .editor
+        .debug_adapters
+        .get_client_mut(id)
+        .ok_or_else(|| anyhow!("Failed to get debug client"))?;
+
+    match &template.request[..] {
+        "launch" => {
+            let call = debugger.launch(args);
+            dap_callback(cx.jobs, call, callback);
+        }
+        "attach" => {
+            let call = debugger.attach(args);
+            dap_callback(cx.jobs, call, callback);
+        }
+        r => bail!("Unsupported request '{}'", r),
+    };
+    Ok(())
+}
+
+pub fn dap_run_config(cx: &mut Context) {
+    if cx.editor.debug_adapters.get_active_client().is_some() {
+        cx.editor.set_error("Debugger is already running");
+        return;
+    }
+
+    let launch_path = helix_loader::workspace_launch_file();
+    let entries = match std::fs::read_to_string(&launch_path) {
+        Ok(s) => match toml::from_str::<helix_loader::LaunchConfig>(&s) {
+            Ok(cfg) => cfg.launch,
+            Err(e) => {
+                cx.editor
+                    .set_error(format!("launch.toml parse error: {}", e));
+                return;
+            }
+        },
+        Err(_) => {
+            cx.editor.set_error(format!(
+                "No launch config found. Create {}",
+                launch_path.display()
+            ));
+            return;
+        }
+    };
+
+    if entries.is_empty() {
+        cx.editor.set_error("launch.toml has no [[launch]] entries");
+        return;
+    }
+
+    let columns = [
+        ui::PickerColumn::new("name", |e: &helix_loader::LaunchEntry, _| {
+            e.name.as_str().into()
+        }),
+        ui::PickerColumn::new("language", |e: &helix_loader::LaunchEntry, _| {
+            e.language.as_str().into()
+        }),
+        ui::PickerColumn::new("template", |e: &helix_loader::LaunchEntry, _| {
+            e.template.as_str().into()
+        }),
+    ];
+
+    cx.push_layer(Box::new(overlaid(Picker::new(
+        columns,
+        0,
+        entries,
+        (),
+        |cx, entry, _action| {
+            if let Err(e) = dap_start_with_entry(cx, entry) {
+                cx.editor.set_error(e.to_string());
+            }
+        },
+    ))));
+}

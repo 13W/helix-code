@@ -81,6 +81,7 @@
 | `:config-reload` | Refresh user config. |
 | `:config-open` | Open the user config.toml file. |
 | `:config-open-workspace` | Open the workspace config.toml file. |
+| `:config-open-launch` | Open the workspace debug launch config file (.helix/launch.toml). |
 | `:log-open` | Open the helix log file. |
 | `:insert-output` | Run shell command, inserting output before each selection. |
 | `:append-output` | Run shell command, appending output after each selection. |
@@ -99,3 +100,7 @@
 | `:noop` | Does nothing. |
 | `:workspace-trust` | Add current workspace to the list of trusted workspaces. |
 | `:workspace-untrust` | Remove current workspace from the list of trusted workspaces. |
+| `:agent-prompt`, `:ap` | Send a prompt to an ACP agent: agent-prompt [agent-name] <text> |
+| `:agent-cancel`, `:ac` | Cancel the in-flight ACP prompt: agent-cancel [agent-name] |
+| `:agent-auth` | Authenticate ACP agent using CLAUDE_CODE_OAUTH_TOKEN env var: agent-auth [agent-name] |
+| `:agent-whoami`, `:aw` | Show authenticated Claude Code account info via ACP: agent-whoami [agent-name] |

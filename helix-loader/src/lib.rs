@@ -1,6 +1,8 @@
 pub mod config;
 pub mod grammar;
 pub mod workspace_trust;
+pub mod launch;
+pub use launch::{LaunchConfig, LaunchEntry};
 
 use helix_stdx::{env::current_working_dir, path};
 
@@ -154,6 +156,10 @@ pub fn workspace_config_file() -> PathBuf {
 
 pub fn workspace_lang_config_file() -> PathBuf {
     find_workspace().0.join(".helix").join("languages.toml")
+}
+
+pub fn workspace_launch_file() -> PathBuf {
+    find_workspace().0.join(".helix").join("launch.toml")
 }
 
 pub fn lang_config_file() -> PathBuf {

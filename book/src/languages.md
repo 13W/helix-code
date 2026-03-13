@@ -242,6 +242,75 @@ The list of supported features is:
 - `document-colors`
 - `call-hierarchy`
 
+## Debug launch configurations
+
+Project-specific debug launch configurations can be stored in a `.helix/launch.toml`
+file. This lets you pre-configure named debug sessions — similar to run/debug
+configurations in IDEs — so you can start debugging without entering parameters
+every time.
+
+Use `Space G L` to open a picker showing all configured launches, or
+`:config-open-launch` to open the file for editing.
+
+### Format
+
+```toml
+[[launch]]
+name = "Debug Server"         # display name in the picker
+language = "rust"             # language-id (matches [[language]] name in languages.toml)
+template = "binary"           # template name from [language.debugger]
+args = ["./target/debug/server"]  # positional parameters filling {0}, {1}, … slots
+
+[launch.extra]                # optional: extra DAP arguments merged on top of template args
+env = { RUST_LOG = "debug" }
+stopOnEntry = false
+
+[[launch]]
+name = "Run Tests"
+language = "rust"
+template = "binary"
+args = ["./target/debug/my_tests"]
+```
+
+| Key | Description |
+| --- | --- |
+| `name` | Display name shown in the picker |
+| `language` | Language ID used to look up the debug adapter (e.g. `"rust"`, `"go"`, `"javascript"`) |
+| `template` | Template name within that language's `[language.debugger]` config |
+| `args` | Positional values substituted into `{0}`, `{1}`, … placeholders in the template |
+| `extra` | Additional DAP arguments merged after template substitution (e.g. `env`, `stopOnEntry`) |
+
+### JavaScript and TypeScript
+
+JavaScript uses the built-in `js-debug-dap` adapter with the `source` template.
+The adapter `command` and `args` must be configured by the user in
+`~/.config/helix/languages.toml` (see the existing `javascript` language entry
+in the built-in `languages.toml` for reference).
+
+```toml
+[[launch]]
+name = "Debug Node.js app"
+language = "javascript"
+template = "source"
+args = ["./src/index.js"]
+
+[[launch]]
+name = "Debug TypeScript (compiled)"
+language = "javascript"
+template = "source"
+args = ["./dist/index.js"]
+
+[launch.extra]
+sourceMaps = true
+outFiles = ["${workspaceFolder}/dist/**/*.js"]
+```
+
+For TypeScript with `ts-node` or `bun`, add a `[language.debugger]` entry for
+`typescript` in `.helix/languages.toml` and reference it with
+`language = "typescript"`.
+
+## Tree-sitter grammar configuration
+
 ## Tree-sitter grammar configuration
 
 The source for a language's tree-sitter grammar is specified in a `[[grammar]]`
