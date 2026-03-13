@@ -125,6 +125,51 @@ pub async fn handle_insert_text(params: InsertTextParams) -> Result<CallToolResu
     Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
 }
 
+// ── patch_file ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchFileParams {
+    /// File path (absolute or relative to CWD)
+    pub path: String,
+    /// Exact string to find and replace. Omit to do a pure line-range replacement.
+    pub old_string: Option<String>,
+    /// Replacement text
+    pub new_string: String,
+    /// 1-indexed inclusive start line (scope for old_string search, or range start)
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
+    pub start_line: Option<usize>,
+    /// 1-indexed exclusive end line (scope for old_string search, or range end)
+    #[serde(default, deserialize_with = "serde_lenient::string_or_usize_opt")]
+    pub end_line: Option<usize>,
+    /// Replace all occurrences instead of just the first. Default: false.
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+
+pub async fn handle_patch_file(params: PatchFileParams) -> Result<CallToolResult> {
+    let tx = editor_tx().ok_or_else(|| anyhow!("no editor connection"))?;
+    let path = resolve_path(&params.path);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(McpCommand::PatchFile {
+        path,
+        old_string: params.old_string,
+        new_string: params.new_string,
+        start_line: params.start_line,
+        end_line: params.end_line,
+        replace_all: params.replace_all,
+        reply: reply_tx,
+    })
+    .await?;
+    let result = reply_rx.await??;
+    let json = serde_json::json!({
+        "path": result.path.to_string_lossy(),
+        "lines_changed": result.lines_changed,
+        "saved": result.saved,
+    });
+    Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+}
+
 // ── rename_symbol ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]

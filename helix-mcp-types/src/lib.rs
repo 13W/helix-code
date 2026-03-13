@@ -576,4 +576,14 @@ pub enum McpCommand {
     GetJumplist {
         reply: oneshot::Sender<Vec<JumpEntry>>,
     },
+    /// Hybrid find-replace / line-range edit.
+    PatchFile {
+        path: PathBuf,
+        old_string: Option<String>,
+        new_string: String,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        replace_all: bool,
+        reply: oneshot::Sender<anyhow::Result<WriteResult>>,
+    },
 }
