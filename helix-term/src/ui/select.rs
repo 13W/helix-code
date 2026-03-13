@@ -63,6 +63,14 @@ impl<T: Item> Component for Select<T> {
     }
 
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
+        // Allow Alt+G to pass through so the agent panel can be toggled
+        // even while a Select popup is open.
+        if let Event::Key(key) = event {
+            use helix_view::input::{KeyCode, KeyModifiers};
+            if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::ALT {
+                return EventResult::Ignored(None);
+            }
+        }
         let result = self.options.handle_event(event, cx);
         // Select is a modal overlay - always consume key events so they don't
         // reach the editor layer below.
