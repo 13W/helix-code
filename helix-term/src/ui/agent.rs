@@ -789,7 +789,7 @@ impl Component for AgentPanel {
                     let agent_id = self.agent_id;
                     if let Some(client) = cx.editor.acp.get_mut(agent_id) {
                         client.display.clear();
-                        client.session_usage = helix_acp::client::SessionUsage::default();
+                        client.session_usage = helix_acp::SessionUsage::default();
                     }
                     self.scroll = 0;
                     self.pinned = true;
