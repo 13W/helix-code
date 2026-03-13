@@ -1,6 +1,6 @@
-use crate::{editor_tx, McpCommand};
+use crate::{editor_tx, fetch_file_content, truncate_to_char_boundary, McpCommand, MAX_INLINE_BYTES};
 use anyhow::Result;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, Content, RawResource};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -18,26 +18,48 @@ pub struct ReadFileParams {
 
 pub async fn handle_read_file(params: ReadFileParams) -> Result<CallToolResult> {
     let path = resolve_path(&params.path);
+    let (content, from_buffer) = fetch_file_content(path.clone()).await?;
+    let line_count = content.lines().count();
 
-    if let Some(tx) = editor_tx() {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(McpCommand::ReadFile { path, reply: reply_tx }).await?;
-        let content = reply_rx.await??;
-        let line_count = content.lines().count();
+    if content.len() <= MAX_INLINE_BYTES {
         let json = serde_json::json!({
             "content": [{ "type": "text", "text": content }],
-            "metadata": { "from_buffer": true, "line_count": line_count }
+            "metadata": { "from_buffer": from_buffer, "line_count": line_count }
         });
         Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
     } else {
-        // No editor channel — fall back to disk
-        let content = std::fs::read_to_string(&params.path)?;
-        let line_count = content.lines().count();
+        let truncated = truncate_to_char_boundary(&content, MAX_INLINE_BYTES);
+        let uri = format!("helix://buffer{}", path.display());
         let json = serde_json::json!({
-            "content": [{ "type": "text", "text": content }],
-            "metadata": { "from_buffer": false, "line_count": line_count }
+            "content": [{ "type": "text", "text": truncated }],
+            "metadata": {
+                "from_buffer": from_buffer,
+                "line_count": line_count,
+                "truncated": true,
+                "total_bytes": content.len(),
+                "uri": uri,
+            }
         });
-        Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+        let resource_link = Content::resource_link(RawResource {
+            uri: uri.clone(),
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            title: None,
+            description: Some(format!(
+                "Full file content ({} bytes). Use read_resource to fetch.",
+                content.len()
+            )),
+            mime_type: Some("text/plain".into()),
+            size: None,
+            icons: None,
+            meta: None,
+        });
+        Ok(CallToolResult::success(vec![
+            Content::text(json.to_string()),
+            resource_link,
+        ]))
     }
 }
 

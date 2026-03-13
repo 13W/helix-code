@@ -44,8 +44,8 @@ pub struct TextEditParams {
     /// First line to replace (1-indexed, inclusive)
     #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub start_line: usize,
-    /// Last line to replace (1-indexed, inclusive).
-    /// Use `end_line < start_line` for a pure insertion (no lines removed).
+    /// First line NOT replaced (1-indexed, exclusive).
+    /// Use `end_line == start_line` for a pure insertion (no lines removed).
     #[serde(deserialize_with = "serde_lenient::string_or_usize")]
     pub end_line: usize,
     /// Replacement text. Empty string to delete lines.

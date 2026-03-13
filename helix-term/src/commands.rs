@@ -7602,13 +7602,15 @@ fn session_picker(cx: &mut Context) {
                             )))
                         });
                         cx.jobs.callback(async move {
-                            handle2
+                            let result = handle2
                                 .session_load(session_id.clone(), mcp_addr)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("session/load failed: {e}"))?;
+                            let config_options = result.config_options;
                             Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
                                 if let Some(client) = editor.acp.get_mut(agent_id) {
                                     client.session_id = Some(session_id.clone());
+                                    client.config_options = config_options;
                                 }
                                 log::info!("ACP: session loaded ({session_id})");
                             })))

@@ -1064,10 +1064,10 @@ impl Application {
                         let upper = &w[0]; // higher line number (comes first after desc sort)
                         let lower = &w[1];
                         // upper.start_line >= lower.start_line (desc order)
-                        // overlap if lower.end_line >= upper.start_line
-                        if lower.end_line >= upper.start_line {
+                        // overlap if lower.end_line > upper.start_line (end_line is exclusive)
+                        if lower.end_line > upper.start_line {
                             anyhow::bail!(
-                                "overlapping edits: [{}, {}] and [{}, {}]",
+                                "overlapping edits: [{}, {}) and [{}, {})",
                                 lower.start_line,
                                 lower.end_line,
                                 upper.start_line,
@@ -1078,14 +1078,11 @@ impl Application {
 
                     for edit in &sorted {
                         let n = lines.len();
-                        // Convert 1-indexed to 0-indexed, clamped.
+                        // Convert 1-indexed inclusive start to 0-indexed.
                         let start = edit.start_line.saturating_sub(1).min(n);
-                        let end = if edit.end_line < edit.start_line {
-                            // Pure insertion: end < start means insert before start line.
-                            start
-                        } else {
-                            edit.end_line.min(n)
-                        };
+                        // end_line is 1-indexed exclusive; convert to 0-indexed exclusive.
+                        // Clamp to [start, n] so invalid ranges become empty (insertion).
+                        let end = edit.end_line.saturating_sub(1).min(n).max(start);
                         let replacement: Vec<String> = if edit.new_text.is_empty() {
                             vec![]
                         } else {
@@ -1093,7 +1090,6 @@ impl Application {
                         };
                         lines.splice(start..end, replacement);
                     }
-
                     let mut new_content = lines.join("\n");
                     // Preserve trailing newline if original had one.
                     if old.ends_with('\n') && !new_content.ends_with('\n') {
@@ -1216,10 +1212,10 @@ impl Application {
                 reply,
             } => {
                 use helix_mcp::TextEdit;
-                // Convert insert to a single ApplyEdits call: end_line < start_line = insertion.
+                // Convert insert to a single ApplyEdits call: end_line == start_line = insertion.
                 let edits = vec![TextEdit {
                     start_line: line,
-                    end_line: line.saturating_sub(1),
+                    end_line: line,
                     new_text: text,
                 }];
                 // Re-dispatch as ApplyEdits.
@@ -1508,10 +1504,10 @@ impl Application {
                     }
                 };
 
-                // Convert 0-indexed LSP range to 1-indexed TextEdit range.
+                // Convert 0-indexed LSP range to 1-indexed TextEdit range (end_line is exclusive).
                 let edits = vec![TextEdit {
                     start_line: lsp_range.start.line as usize + 1,
-                    end_line: lsp_range.end.line as usize + 1,
+                    end_line: lsp_range.end.line as usize + 2, // +1 for 0→1 indexed, +1 for inclusive→exclusive
                     new_text: body,
                 }];
 
@@ -3054,37 +3050,23 @@ impl Application {
                 let _ = reply.send(result);
             }
 
-            McpCommand::GetVariables { frame_id, reply } => {
+            McpCommand::GetVariables { variables_ref, reply } => {
                 let result: anyhow::Result<Vec<helix_mcp::VariableInfo>> = async {
                     let dbg = self
                         .editor
                         .debug_adapters
                         .get_active_client()
                         .ok_or_else(|| anyhow::anyhow!("No active debugger"))?;
-                    let tid = dbg
-                        .thread_id
-                        .ok_or_else(|| anyhow::anyhow!("Debugger not paused"))?;
-                    let frame_idx = frame_id.or(dbg.active_frame).unwrap_or(0);
-                    let frame = dbg
-                        .stack_frames
-                        .get(&tid)
-                        .and_then(|fs| fs.get(frame_idx))
-                        .ok_or_else(|| anyhow::anyhow!("No stack frame at index {frame_idx}"))?;
-                    let fid = frame.id;
-                    let scopes = dbg.scopes(fid).await?;
-                    let mut vars: Vec<helix_mcp::VariableInfo> = Vec::new();
-                    for scope in scopes {
-                        let scope_vars = dbg.variables(scope.variables_reference).await?;
-                        for v in scope_vars {
-                            vars.push(helix_mcp::VariableInfo {
-                                name: v.name,
-                                value: v.value,
-                                type_name: v.ty,
-                                variables_ref: v.variables_reference,
-                            });
-                        }
-                    }
-                    Ok(vars)
+                    let scope_vars = dbg.variables(variables_ref).await?;
+                    Ok(scope_vars
+                        .into_iter()
+                        .map(|v| helix_mcp::VariableInfo {
+                            name: v.name,
+                            value: v.value,
+                            type_name: v.ty,
+                            variables_ref: v.variables_reference,
+                        })
+                        .collect())
                 }
                 .await;
                 let _ = reply.send(result);
@@ -3238,6 +3220,196 @@ impl Application {
                 };
                 let _ = reply.send(result);
             }
+
+            // --- DAP: Session lifecycle ---
+
+            McpCommand::DapListTemplates { reply } => {
+                use helix_core::syntax::config::DebugConfigCompletion;
+                use helix_mcp::{DapParamInfo, DapTemplateInfo};
+                let result: anyhow::Result<Vec<DapTemplateInfo>> = (|| {
+                    let view = self.editor.tree.get(self.editor.tree.focus);
+                    let doc = &self.editor.documents[&view.doc];
+                    let config = doc
+                        .language_config()
+                        .and_then(|c| c.debugger.as_ref())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no debug adapter configured for this language")
+                        })?;
+                    Ok(config
+                        .templates
+                        .iter()
+                        .map(|t| DapTemplateInfo {
+                            name: t.name.clone(),
+                            request: t.request.clone(),
+                            params: t
+                                .completion
+                                .iter()
+                                .map(|c| match c {
+                                    DebugConfigCompletion::Named(n) => DapParamInfo {
+                                        name: n.clone(),
+                                        completion: None,
+                                        default: None,
+                                    },
+                                    DebugConfigCompletion::Advanced(a) => DapParamInfo {
+                                        name: a.name.clone().unwrap_or_default(),
+                                        completion: a.completion.clone(),
+                                        default: a.default.clone(),
+                                    },
+                                })
+                                .collect(),
+                        })
+                        .collect())
+                })();
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapLaunch {
+                template_name,
+                params,
+                reply,
+            } => {
+                use helix_core::syntax::config::DebugConfigCompletion;
+                use serde_json::{to_value, Value};
+                use std::collections::HashMap;
+
+                fn map_dap_value(value: &Value, params: &[String]) -> Value {
+                    match value {
+                        Value::String(s) => {
+                            let mut s = s.clone();
+                            for (i, x) in params.iter().enumerate() {
+                                s = s.replace(&format!("{{{}}}", i), x);
+                            }
+                            if let Ok(n) = s.parse::<usize>() {
+                                to_value(n).unwrap()
+                            } else {
+                                to_value(s).unwrap()
+                            }
+                        }
+                        Value::Array(a) => {
+                            Value::Array(a.iter().map(|v| map_dap_value(v, params)).collect())
+                        }
+                        Value::Object(o) => Value::Object(
+                            o.iter()
+                                .map(|(k, v)| (k.clone(), map_dap_value(v, params)))
+                                .collect(),
+                        ),
+                        _ => value.clone(),
+                    }
+                }
+
+                let result: anyhow::Result<()> = async {
+                    if self.editor.debug_adapters.get_active_client().is_some() {
+                        anyhow::bail!("debugger is already running");
+                    }
+                    let view = self.editor.tree.get(self.editor.tree.focus);
+                    let doc = &self.editor.documents[&view.doc];
+                    let config = doc
+                        .language_config()
+                        .and_then(|c| c.debugger.as_ref())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no debug adapter configured for this language")
+                        })?;
+                    // Clone to release the immutable borrow on editor before start_client.
+                    let config = config.clone();
+
+                    let id = self
+                        .editor
+                        .debug_adapters
+                        .start_client(None, &config)
+                        .map_err(|e| anyhow::anyhow!("failed to start debug client: {e}"))?;
+
+                    let template = match template_name.as_deref() {
+                        Some(name) => config.templates.iter().find(|t| t.name == name),
+                        None => config.templates.first(),
+                    }
+                    .ok_or_else(|| anyhow::anyhow!("no matching debug template"))?;
+
+                    // Canonicalize filename/directory params.
+                    let preprocessed: Vec<String> = params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if let Some(DebugConfigCompletion::Advanced(cfg)) =
+                                template.completion.get(i)
+                            {
+                                if matches!(
+                                    cfg.completion.as_deref(),
+                                    Some("filename" | "directory")
+                                ) {
+                                    return std::fs::canonicalize(x)
+                                        .ok()
+                                        .and_then(|p| p.into_os_string().into_string().ok())
+                                        .unwrap_or_else(|| x.clone());
+                                }
+                            }
+                            x.clone()
+                        })
+                        .collect();
+
+                    let mut args: HashMap<&str, Value> = if params.is_empty() {
+                        template
+                            .args
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect()
+                    } else {
+                        template
+                            .args
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), map_dap_value(v, &preprocessed)))
+                            .collect()
+                    };
+                    args.insert("cwd", to_value(helix_stdx::env::current_working_dir())?);
+                    let args = to_value(args)?;
+
+                    let debugger = self
+                        .editor
+                        .debug_adapters
+                        .get_client_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("failed to get debug client"))?;
+
+                    match &template.request[..] {
+                        "launch" => {
+                            tokio::spawn(debugger.launch(args));
+                            Ok(())
+                        }
+                        "attach" => {
+                            tokio::spawn(debugger.attach(args));
+                            Ok(())
+                        }
+                        r => anyhow::bail!("unsupported DAP request type: {r}"),
+                    }
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+
+            McpCommand::DapTerminate { reply } => {
+                use helix_dap::requests::TerminateArguments;
+                let result: anyhow::Result<()> = async {
+                    let debugger = self
+                        .editor
+                        .debug_adapters
+                        .get_active_client_mut()
+                        .ok_or_else(|| anyhow::anyhow!("no active debugger"))?;
+                    if debugger
+                        .caps
+                        .as_ref()
+                        .is_some_and(|c| c.supports_terminate_request.unwrap_or_default())
+                    {
+                        let fut = debugger
+                            .terminate(Some(TerminateArguments { restart: Some(false) }));
+                        fut.await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+                    } else {
+                        Ok(())
+                    }
+                }
+                .await;
+                self.editor.debug_adapters.unset_active_client();
+                let _ = reply.send(result);
+            }
+
+            // --- VCS: Diff ---
 
             // --- VCS: Diff ---
 
@@ -3709,12 +3881,21 @@ impl Application {
                     .into_iter()
                     .map(PermOption::Agent)
                     .collect();
-                if let Some(ref plan) = plan_text {
+                if plan_text.is_some() {
                     items.insert(0, PermOption::CleanContext {
-                        plan: plan.clone(),
                         allow_always_id: allow_always_id.clone(),
                     });
                 }
+                // Reorder: CleanContext first, then Allow, then AllowAlways.
+                items.sort_by_key(|item| match item {
+                    PermOption::CleanContext { .. } => 0,
+                    PermOption::Agent(opt)
+                        if opt.kind == PermissionOptionKind::AllowAlways =>
+                    {
+                        2
+                    }
+                    PermOption::Agent(_) => 1,
+                });
 
                 let select = ui::Select::new(
                     title,
@@ -3725,13 +3906,8 @@ impl Application {
                         let response = match event {
                             PromptEvent::Update => return,
                             PromptEvent::Validate => match option {
-                                PermOption::CleanContext { plan, allow_always_id } => {
-                                    // Store plan for deferred new-session processing.
-                                    if let Some(client) = editor.acp.get_mut(agent_id) {
-                                        client.pending_clean_context_plan =
-                                            Some(plan.clone());
-                                    }
-                                    // Run the same side effects as AllowAlways.
+                                PermOption::CleanContext { allow_always_id } => {
+                                    // Side effects same as AllowAlways.
                                     if let Some(ref ac) = auto_continue_arc {
                                         ac.store(
                                             true,
@@ -3740,16 +3916,11 @@ impl Application {
                                     }
                                     if let Some(client) = editor.acp.get_mut(agent_id) {
                                         client.auto_accept_edits = true;
+                                        // Defer: send /clear first, then reply.
+                                        client.pending_clean_context_reply =
+                                            Some((reply.clone(), allow_always_id.clone()));
                                     }
-                                    // Respond with AllowAlways — Claude Code registers this
-                                    // and auto-approves future ExitPlanMode calls.
-                                    RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Selected(
-                                            SelectedPermissionOutcome::new(
-                                                allow_always_id.clone(),
-                                            ),
-                                        ),
-                                    )
+                                    return; // reply is sent asynchronously
                                 }
                                 PermOption::Agent(opt) => {
                                     // When the user picks "always allow", signal the job to
@@ -3988,77 +4159,82 @@ impl Application {
             event => self.compositor.handle_event(&event.into(), &mut cx),
         };
 
-        // After compositor event handling, check for any pending clean-context plan
-        // (set by the permission dialog callback when user selects "Apply (clean context)").
-
-        // After compositor event handling, check for any pending clean-context plan
+        // After compositor event handling, flush any pending clean-context permission replies
         // (set by the permission dialog callback when user selects "Apply (clean context)").
         {
-            use helix_acp::AgentId;
-            let pending: Vec<(AgentId, String)> = self
+            use helix_acp::sdk::{
+                RequestPermissionOutcome, RequestPermissionResponse, SelectedPermissionOutcome,
+            };
+            // Collect IDs with pending replies (Registry only exposes iter(), not iter_mut()).
+            let pending_ids: Vec<helix_acp::AgentId> = self
                 .editor
                 .acp
                 .iter()
                 .filter_map(|(id, c)| {
-                    c.pending_clean_context_plan
-                        .as_ref()
-                        .map(|p| (id, p.clone()))
+                    if c.pending_clean_context_reply.is_some() {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let pending: Vec<_> = pending_ids
+                .into_iter()
+                .filter_map(|id| {
+                    self.editor
+                        .acp
+                        .get_mut(id)
+                        .and_then(|c| c.pending_clean_context_reply.take())
+                        .map(|(reply, allow_id)| (id, reply, allow_id))
                 })
                 .collect();
 
-            for (agent_id, plan_text) in pending {
+for (agent_id, reply, allow_always_id) in pending {
                 if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                    client.pending_clean_context_plan = None;
-                    client.display.clear();
-                    client.session_usage = helix_acp::client::SessionUsage::default();
-                    client.current_mode = None;
                     client.is_prompting = true;
-                }
-                if let Some(client) = self.editor.acp.get(agent_id) {
                     let handle = client.handle();
                     let session_id = client.session_id.clone();
                     self.jobs.callback(async move {
                         use crate::job::Callback;
                         let sid = match session_id {
                             Some(s) => s,
-                            None => return Err(anyhow::anyhow!("no active session")),
-                        };
-                        // 1. Clear context on the existing session.
-                        handle
-                            .session_prompt(sid.clone(), vec![helix_acp::ContentBlock::text("/clear")])
-                            .await
-                            .map_err(|e| anyhow::anyhow!("clear failed: {e}"))?;
-                        // 2. Switch to accept-edits before sending the plan.
-                        handle
-                            .session_set_mode(sid.clone(), "acceptEdits".to_string())
-                            .await
-                            .map_err(|e| anyhow::anyhow!("session/set_mode failed: {e}"))?;
-                        // 3. Send the approved plan.
-                        let prompt = vec![helix_acp::ContentBlock::text(plan_text)];
-                        match handle
-                            .session_prompt(sid.clone(), prompt)
-                            .await
-                        {
-                            Err(e) => {
+                            None => {
                                 return Ok(Callback::Editor(Box::new(move |editor| {
                                     if let Some(c) = editor.acp.get_mut(agent_id) {
                                         c.is_prompting = false;
-                                        c.session_id = Some(sid);
                                     }
-                                    editor.set_error(format!("Agent error: {e}"));
+                                    editor.set_error("no active session");
                                 })));
                             }
-                            Ok(_stop) => {}
-                        }
+                        };
+                        // 1. Clear context on the existing session.
+                        let clear_result = handle
+                            .session_prompt(
+                                sid.clone(),
+                                vec![helix_acp::ContentBlock::text("/clear")],
+                            )
+                            .await;
+                        // 2. Send the permission response.
+                        let _ = reply
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .map(|tx: tokio::sync::oneshot::Sender<RequestPermissionResponse>| {
+                                tx.send(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Selected(
+                                        SelectedPermissionOutcome::new(allow_always_id),
+                                    ),
+                                ))
+                            });
                         Ok(Callback::Editor(Box::new(move |editor| {
                             if let Some(c) = editor.acp.get_mut(agent_id) {
                                 c.is_prompting = false;
-                                c.session_id = Some(sid);
                             }
-                            editor.set_status("Agent done (clean context)");
+                            if let Err(e) = clear_result {
+                                editor.set_error(format!("clear failed: {e}"));
+                            }
                         })))
                     });
-                    self.editor.set_status("Applying plan in clean context\u{2026}");
                 }
             }
         }
@@ -4694,7 +4870,7 @@ impl ui::menu::Item for helix_acp::sdk::PermissionOption {
 /// Wraps agent-provided permission options plus Helix-injected extras.
 enum PermOption {
     Agent(helix_acp::sdk::PermissionOption),
-    CleanContext { plan: String, allow_always_id: String },
+    CleanContext { allow_always_id: String },
 }
 
 impl ui::menu::Item for PermOption {

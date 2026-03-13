@@ -141,6 +141,16 @@ pub struct NewSessionResult {
 }
 
 // ---------------------------------------------------------------------------
+// session/load
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LoadSessionResult {
+    /// Configuration options (model, mode, …) received in the `session/load` response.
+    pub config_options: Vec<sdk::SessionConfigOption>,
+}
+
+// ---------------------------------------------------------------------------
 // session/prompt
 // ---------------------------------------------------------------------------
 
