@@ -63,7 +63,13 @@ impl<T: Item> Component for Select<T> {
     }
 
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
-        self.options.handle_event(event, cx)
+        let result = self.options.handle_event(event, cx);
+        // Select is a modal overlay - always consume key events so they don't
+        // reach the editor layer below.
+        match (event, result) {
+            (Event::Key(_), EventResult::Ignored(cb)) => EventResult::Consumed(cb),
+            (_, result) => result,
+        }
     }
 
     fn required_size(&mut self, viewport: (u16, u16)) -> Option<(u16, u16)> {
