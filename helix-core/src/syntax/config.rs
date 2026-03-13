@@ -474,7 +474,12 @@ pub struct AgentConfiguration {
     /// Whether this agent is started automatically on editor launch. Default: true.
     #[serde(default = "default_agent_enabled")]
     pub enabled: bool,
+    /// Write all ACP JSON-RPC messages to `~/.cache/helix/acp-{timestamp}.jsonl`.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub log: bool,
 }
+
 
 fn default_agent_enabled() -> bool {
     true

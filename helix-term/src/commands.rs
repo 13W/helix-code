@@ -7183,10 +7183,17 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
         cx.editor.set_error("No enabled agent configured");
         return;
     };
+    let log_path = if agent_cfg.log {
+        let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
+        Some(helix_loader::cache_dir().join(format!("acp-{ts}.jsonl")))
+    } else {
+        None
+    };
     let config = helix_acp::client::AgentConfig {
         command: agent_cfg.command.clone(),
         args: agent_cfg.args.clone(),
         env: agent_cfg.environment.clone(),
+        log_path,
     };
     let name = agent_cfg.name.clone();
     drop(loader);
@@ -7376,13 +7383,21 @@ fn session_picker(cx: &mut Context) {
         cx.editor.set_error("No enabled agent configured");
         return;
     };
+    let log_path = if agent_cfg.log {
+        let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
+        Some(helix_loader::cache_dir().join(format!("acp-{ts}.jsonl")))
+    } else {
+        None
+    };
     let config = helix_acp::client::AgentConfig {
         command: agent_cfg.command.clone(),
         args: agent_cfg.args.clone(),
         env: agent_cfg.environment.clone(),
+        log_path,
     };
     let name = agent_cfg.name.clone();
     drop(loader);
+
 
     // Start a fresh agent — it will be reused for the chosen session.
     let agent_id = match cx.editor.acp.start_agent(&config) {
