@@ -116,21 +116,22 @@ impl<T: Item> Component for Select<T> {
         let inner = Block::bordered().inner(dialog);
 
         // Message with 1-char horizontal padding so text isn't flush with the border.
+        let msg_height = message_height.min(inner.height);
         let msg_area = Rect::new(
             inner.x + 1,
             inner.y,
             inner.width.saturating_sub(2),
-            message_height,
+            msg_height,
         );
         self.message.render(msg_area, surface, cx);
 
         // ─── separator between message and options.
-        let sep_y = inner.y + message_height;
+        let sep_y = inner.y + msg_height;
         let sep: String = "─".repeat(inner.width as usize);
         surface.set_string(inner.x, sep_y, &sep, border_style);
 
         // Options menu below the separator.
-        let avail = inner.height.saturating_sub(message_height + 1);
+        let avail = inner.height.saturating_sub(msg_height + 1);
         let menu_area = Rect::new(inner.x, sep_y + 1, inner.width, avail.min(menu_height));
         self.options.render(menu_area, surface, cx);
     }
