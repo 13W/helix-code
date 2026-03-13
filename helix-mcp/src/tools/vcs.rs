@@ -1,10 +1,10 @@
 use anyhow::Result;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, Content, RawResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::{editor_tx, HunkKind, McpCommand};
+use crate::{editor_tx, fetch_diff_base_content, truncate_to_char_boundary, HunkKind, McpCommand, MAX_INLINE_BYTES};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiffHunksParams {
@@ -71,16 +71,35 @@ pub async fn handle_diff_hunks(params: DiffHunksParams) -> Result<CallToolResult
 }
 
 pub async fn handle_diff_base(params: DiffBaseParams) -> Result<CallToolResult> {
-    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(McpCommand::GetDiffBase {
-        path: params.path,
-        reply: reply_tx,
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let content = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
-    Ok(CallToolResult::success(vec![Content::text(content)]))
+    let content = fetch_diff_base_content(params.path.clone()).await?;
+    if content.len() <= MAX_INLINE_BYTES {
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    } else {
+        let truncated = truncate_to_char_boundary(&content, MAX_INLINE_BYTES);
+        let uri = format!("helix://diff-base{}", params.path.display());
+        let resource_link = Content::resource_link(RawResource {
+            uri: uri.clone(),
+            name: params
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            title: None,
+            description: Some(format!(
+                "Full HEAD content ({} bytes). Use read_resource to fetch.",
+                content.len()
+            )),
+            mime_type: Some("text/plain".into()),
+            size: None,
+            icons: None,
+            meta: None,
+        });
+        Ok(CallToolResult::success(vec![
+            Content::text(format!(
+                "{truncated}\n\n[truncated — {total} bytes total, use resource link for full content]",
+                total = content.len()
+            )),
+            resource_link,
+        ]))
+    }
 }

@@ -9,12 +9,16 @@ mod tools;
 use anyhow::Result;
 use axum::{Router, extract::{Request, State}, response::IntoResponse, routing::any};
 use rmcp::{
+    ErrorData as McpError,
     ServerHandler,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Content, Implementation, InitializeResult,
-        ProtocolVersion, ServerCapabilities,
+        AnnotateAble, ListResourceTemplatesResult, PaginatedRequestParams, ProtocolVersion,
+        RawResourceTemplate, ReadResourceRequestParams,
+        ReadResourceResult, ResourceContents, ServerCapabilities,
     },
+    service::{RequestContext, RoleServer},
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
@@ -22,6 +26,53 @@ use rmcp::transport::streamable_http_server::{
 };
 use std::{net::SocketAddr, path::PathBuf, sync::{Arc, Mutex, OnceLock}};
 use tokio::sync::{mpsc, oneshot};
+// ---------------------------------------------------------------------------
+// MCP resource constants and helpers
+// ---------------------------------------------------------------------------
+
+/// Maximum bytes to return inline in a tool response.
+/// Files larger than this get their content truncated to this size,
+/// plus a `resource_link` pointing to the full content via `read_resource`.
+pub const MAX_INLINE_BYTES: usize = 128 * 1024;
+
+/// Truncate a UTF-8 string to at most `max_bytes`, aligned to a char boundary.
+pub fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
+}
+
+/// Read file content from the editor buffer (if open) or from disk.
+/// Returns `(content, from_buffer)`.
+pub async fn fetch_file_content(path: PathBuf) -> anyhow::Result<(String, bool)> {
+    if let Some(tx) = editor_tx() {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(McpCommand::ReadFile { path, reply: reply_tx }).await?;
+        let content = reply_rx.await??;
+        Ok((content, true))
+    } else {
+        let content = std::fs::read_to_string(&path)?;
+        Ok((content, false))
+    }
+}
+
+/// Read the HEAD (VCS base) content of a file via diff providers.
+pub async fn fetch_diff_base_content(path: PathBuf) -> anyhow::Result<String> {
+    let tx = editor_tx().ok_or_else(|| anyhow::anyhow!("editor channel not available"))?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(McpCommand::GetDiffBase { path, reply: reply_tx })
+        .await
+        .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
+    reply_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("reply channel closed"))?
+}
+
 
 // ---------------------------------------------------------------------------
 // Editor ↔ MCP command types
@@ -227,6 +278,24 @@ pub struct VariableInfo {
     pub type_name: Option<String>,
     pub variables_ref: usize,
 }
+
+/// A debug template entry returned by `dap_list_templates`.
+pub struct DapTemplateInfo {
+    pub name: String,
+    /// Either `"launch"` or `"attach"`.
+    pub request: String,
+    /// Positional parameters the template expects.
+    pub params: Vec<DapParamInfo>,
+}
+
+/// One positional parameter slot in a `DapTemplateInfo`.
+pub struct DapParamInfo {
+    pub name: String,
+    /// Completion hint: `"filename"`, `"directory"`, or `None`.
+    pub completion: Option<String>,
+    pub default: Option<String>,
+}
+
 
 /// The kind of a diff hunk.
 pub enum HunkKind {
@@ -452,10 +521,9 @@ pub enum McpCommand {
         frame_id: usize,
         reply: oneshot::Sender<anyhow::Result<Vec<ScopeInfo>>>,
     },
-    /// Get variables for the active (or specified) stack frame.
+    /// Get variables for a scope identified by its `variables_ref` (from `get_scopes`).
     GetVariables {
-        /// `None` uses the active frame.
-        frame_id: Option<usize>,
+        variables_ref: usize,
         reply: oneshot::Sender<anyhow::Result<Vec<VariableInfo>>>,
     },
 
@@ -496,6 +564,26 @@ pub enum McpCommand {
     },
 
     // --- Buffer management ---
+
+
+    // --- DAP: Session lifecycle ---
+
+    /// List debug templates for the focused document's language.
+    DapListTemplates {
+        reply: oneshot::Sender<anyhow::Result<Vec<DapTemplateInfo>>>,
+    },
+    /// Launch (or attach to) a debug session.
+    DapLaunch {
+        /// Template name. `None` = first template.
+        template_name: Option<String>,
+        /// Positional parameters for the template.
+        params: Vec<String>,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Terminate the active debug session.
+    DapTerminate {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
 
     /// Load a file into the editor buffer without displaying it to the user.
     LoadFile {
@@ -859,7 +947,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get variables for the active (or specified) stack frame. Requires debugger to be paused.")]
+    #[rmcp::tool(description = "Get variables for a scope. Pass variables_ref from get_scopes to query a specific scope directly. Or pass frame_id to auto-resolve locals without needing get_scopes first (scope_name defaults to 'local'; pass 'register' to get CPU registers). Requires debugger to be paused.")]
     async fn get_variables(
         &self,
         params: Parameters<tools::dap::GetVariablesParams>,
@@ -867,6 +955,7 @@ impl HelixMcpServer {
         tools::dap::handle_get_variables(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
+
 
     #[rmcp::tool(description = "Resume execution of the paused debugger thread.")]
     async fn dap_continue(
@@ -907,6 +996,32 @@ impl HelixMcpServer {
         tools::dap::handle_dap_step_out().await
             .map_err(tools::fs::to_mcp_err)
     }
+
+    #[rmcp::tool(description = "List debug templates available for the focused document's language. Call this before dap_launch to discover template names and required parameters.")]
+    async fn dap_list_templates(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_list_templates().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Launch a debug session for the focused document. Use dap_list_templates first to discover the template_name and required params.")]
+    async fn dap_launch(
+        &self,
+        params: Parameters<tools::dap::DapLaunchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_launch(params.0).await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
+    #[rmcp::tool(description = "Terminate the active debug session.")]
+    async fn dap_terminate(
+        &self,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::dap::handle_dap_terminate().await
+            .map_err(tools::fs::to_mcp_err)
+    }
+
 
     #[rmcp::tool(description = "Get VCS diff hunks for a file (requires it to be open in the editor).")]
     async fn diff_hunks(
@@ -976,7 +1091,7 @@ impl ServerHandler for HelixMcpServer {
     fn get_info(&self) -> InitializeResult {
         InitializeResult {
             protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder().enable_tools().enable_resources().build(),
             server_info: Implementation {
                 name: "helix".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
@@ -997,6 +1112,70 @@ impl ServerHandler for HelixMcpServer {
                     .into(),
             ),
         }
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: vec![
+                RawResourceTemplate {
+                    uri_template: "helix://buffer/{path}".into(),
+                    name: "Editor buffer / file (full content)".into(),
+                    title: None,
+                    description: Some(
+                        "Full file content from the editor buffer (includes unsaved changes). \
+                         Use read_resource when read_file truncates a large file."
+                            .into(),
+                    ),
+                    mime_type: Some("text/plain".into()),
+                    icons: None,
+                }
+                .no_annotation(),
+                RawResourceTemplate {
+                    uri_template: "helix://diff-base/{path}".into(),
+                    name: "VCS HEAD base content (full)".into(),
+                    title: None,
+                    description: Some(
+                        "Full HEAD version of a file from VCS. \
+                         Use read_resource when diff_base truncates a large file."
+                            .into(),
+                    ),
+                    mime_type: Some("text/plain".into()),
+                    icons: None,
+                }
+                .no_annotation(),
+            ],
+            ..Default::default()
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let uri = &request.uri;
+        let content = if let Some(p) = uri.strip_prefix("helix://buffer") {
+            fetch_file_content(PathBuf::from(p))
+                .await
+                .map(|(c, _)| c)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        } else if let Some(p) = uri.strip_prefix("helix://diff-base") {
+            fetch_diff_base_content(PathBuf::from(p))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        } else {
+            return Err(McpError::internal_error(
+                format!("Unknown resource URI: {uri}"),
+                None,
+            ));
+        };
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents::text(content, uri.clone())],
+        })
     }
 }
 
