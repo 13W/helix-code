@@ -1,0 +1,17 @@
+[package]
+name = "helix-mcp-types"
+description = "Types for the embedded MCP (Model Context Protocol) server"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"

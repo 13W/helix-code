@@ -1674,6 +1674,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures-util",
+ "helix-acp-types",
  "log",
  "serde",
  "serde_json",
@@ -1681,6 +1682,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+]
+
+[[package]]
+name = "helix-acp-types"
+version = "25.7.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1826,6 +1837,7 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "helix-mcp-types",
  "ignore",
  "log",
  "rmcp",
@@ -1833,6 +1845,16 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tokio",
+]
+
+[[package]]
+name = "helix-mcp-types"
+version = "25.7.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

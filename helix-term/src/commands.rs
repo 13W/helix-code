@@ -7190,7 +7190,7 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
     } else {
         None
     };
-    let config = helix_acp::client::AgentConfig {
+    let config = helix_acp::AgentConfig {
         command: agent_cfg.command.clone(),
         args: agent_cfg.args.clone(),
         env: agent_cfg.environment.clone(),
@@ -7242,7 +7242,7 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                         auth_methods.iter().any(|m| m.id == "claude-login");
                     if has_claude_login {
                         if let Some(token) = read_claude_oauth_token() {
-                            use helix_acp::types::AuthenticateParams;
+                            use helix_acp::AuthenticateParams;
                             let params = AuthenticateParams {
                                 extra: serde_json::json!({
                                     "methodId": "claude-login",
@@ -7390,7 +7390,7 @@ fn session_picker(cx: &mut Context) {
     } else {
         None
     };
-    let config = helix_acp::client::AgentConfig {
+    let config = helix_acp::AgentConfig {
         command: agent_cfg.command.clone(),
         args: agent_cfg.args.clone(),
         env: agent_cfg.environment.clone(),
@@ -7450,7 +7450,7 @@ fn session_picker(cx: &mut Context) {
         // Authenticate if needed.
         if auth_methods.iter().any(|m| m.id == "claude-login") {
             if let Some(token) = read_claude_oauth_token() {
-                use helix_acp::types::AuthenticateParams;
+                use helix_acp::AuthenticateParams;
                 let params = AuthenticateParams {
                     extra: serde_json::json!({ "methodId": "claude-login", "token": token })
                         .as_object()

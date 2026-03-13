@@ -3096,7 +3096,7 @@ fn agent_auth(
         client.handle()
     };
 
-    let params = helix_acp::types::AuthenticateParams {
+    let params = helix_acp::AuthenticateParams {
         extra: serde_json::json!({ "method": "claude-login", "token": token })
             .as_object()
             .cloned()
