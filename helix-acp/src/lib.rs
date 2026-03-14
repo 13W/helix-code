@@ -21,6 +21,7 @@
 
 pub mod client;
 pub mod registry;
+pub mod state;
 pub(crate) mod rpc;
 pub(crate) mod handler;
 
@@ -33,3 +34,4 @@ pub use helix_acp_types::*;
 
 pub use client::{AcpEvent, Client, ClientHandle, ReplyChannel};
 pub use registry::Registry;
+pub use state::{AcpState, ToolCallUpdate};

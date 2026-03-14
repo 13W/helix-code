@@ -8,7 +8,6 @@ use helix_acp_types::*;
 use agent_client_protocol as sdk;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
 use tokio::{
     process::{Child, Command},
     sync::{
@@ -94,6 +93,11 @@ pub struct LoadSessionResult {
 // ---------------------------------------------------------------------------
 
 /// An ACP agent client connected via stdio.
+///
+/// This struct holds only **transport and protocol** state.  All UI-facing
+/// state (display buffer, session usage, config options, …) lives in the
+/// companion [`AcpState`](crate::AcpState) struct, stored alongside this
+/// `Client` in the [`Registry`](crate::Registry).
 #[derive(Debug)]
 pub struct Client {
     pub id: AgentId,
@@ -109,33 +113,6 @@ pub struct Client {
     /// The original session_id passed via --resume, if this agent resumed a prior session.
     /// Used by the session picker to match running agents to JSONL file entries.
     pub resume_session_id: Option<String>,
-    /// Structured display buffer, accumulated from `session/update` notifications.
-    pub display: Vec<DisplayLine>,
-    /// True while a `session/prompt` job is in flight.
-    pub is_prompting: bool,
-    /// Tracks file paths for in-progress "edit" tool calls.
-    pub pending_edits: std::collections::HashMap<String, Vec<String>>,
-    /// Current session mode received via `CurrentModeUpdate`.
-    pub current_mode: Option<String>,
-    /// Set to true by the permission dialog when the user selects an `AllowAlways` option.
-    pub auto_continue: Arc<AtomicBool>,
-    /// True after the user has selected "auto-accept edits" for this session.
-    pub auto_accept_edits: bool,
-    /// Accumulated token and cost statistics for the current session.
-    pub session_usage: SessionUsage,
-    /// Commands received via `AvailableCommandsUpdate`.
-    pub available_commands: Vec<sdk::AvailableCommand>,
-    /// Command text to drain into the textarea on the next panel event.
-    pub pending_command: Option<String>,
-    /// Session config options (model, mode, …) from `session/new` or `ConfigOptionUpdate`.
-    pub config_options: Vec<sdk::SessionConfigOption>,
-    /// Pending (option_id, value) to apply via `session_set_config_option` from the UI.
-    pub pending_config_change: Option<(String, String)>,
-    /// Pending reply channel + allow_always_id for a deferred "clean context" permission response.
-    /// Set by the permission dialog; consumed by the main loop to send /clear then reply.
-    pub pending_clean_context_reply: Option<(ReplyChannel<sdk::RequestPermissionResponse>, String)>,
-    /// Authenticated user info, fetched after `authenticate()` + `session_new()` succeed.
-    pub account_info: Option<AccountInfo>,
 }
 
 /// Build one JSONL log entry: `{"ts":<unix_ms>,"dir":"<dir>","line":<escaped>}`.
@@ -362,19 +339,6 @@ impl Client {
             session_id: None,
             auth_methods: Vec::new(),
             resume_session_id: None,
-            display: Vec::new(),
-            is_prompting: false,
-            pending_edits: std::collections::HashMap::new(),
-            current_mode: None,
-            auto_continue: Arc::new(AtomicBool::new(false)),
-            auto_accept_edits: false,
-            session_usage: SessionUsage::default(),
-            available_commands: Vec::new(),
-            pending_command: None,
-            config_options: Vec::new(),
-            pending_config_change: None,
-            pending_clean_context_reply: None,
-            account_info: None,
         };
 
         Ok((client, event_rx))
@@ -409,7 +373,6 @@ impl Client {
         let result = self.handle().session_new(cwd, mcp_addr).await?;
         let sid = result.session_id.clone();
         self.session_id = Some(sid.clone());
-        self.config_options = result.config_options;
         log::info!("ACP agent '{}' session created: {}", self.name, sid);
         Ok(sid)
     }
@@ -421,7 +384,6 @@ impl Client {
     ) -> Result<LoadSessionResult> {
         let result = self.handle().session_load(session_id.clone(), mcp_addr).await?;
         self.session_id = Some(session_id);
-        self.config_options = result.config_options.clone();
         Ok(result)
     }
 
@@ -479,19 +441,6 @@ impl Client {
         }
     }
 
-    /// Concatenate all [`DisplayLine::Text`] entries into a single string.
-    pub fn response_text(&self) -> String {
-        self.display
-            .iter()
-            .filter_map(|l| {
-                if let DisplayLine::Text(s) = l {
-                    Some(s.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 }
 
 // ---------------------------------------------------------------------------

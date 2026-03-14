@@ -52,8 +52,8 @@ fn build_slash_items(cx: &Context, agent_id: helix_acp::AgentId) -> Vec<(String,
         .iter()
         .map(|(n, d)| (n.to_string(), d.to_string(), false))
         .collect();
-    if let Some(client) = cx.editor.acp.get(agent_id) {
-        for cmd in &client.available_commands {
+    if let Some(state) = cx.editor.acp.state(agent_id) {
+        for cmd in &state.available_commands {
             items.push((cmd.name.clone(), cmd.description.clone(), cmd.input.is_some()));
         }
     }
@@ -396,6 +396,9 @@ impl Component for AgentPanel {
         let Some(client) = cx.editor.acp.get(self.agent_id) else {
             return;
         };
+        let Some(state) = cx.editor.acp.state(self.agent_id) else {
+            return;
+        };
 
         let popup_style = cx.editor.theme.get("ui.popup.info");
         let thought_style = cx
@@ -453,20 +456,20 @@ impl Component for AgentPanel {
         // Status badge first.
 
         // Model label from config_options (id = "model").
-        if let Some(label) = config_option_current_label(&client.config_options, "model") {
+        if let Some(label) = config_option_current_label(&state.config_options, "model") {
             title.push_str(&format!(" [{label}]"));
         }
 
         // Mode label: use current_mode with find_label_for_value first (so it updates
         // immediately on CurrentModeUpdate even before config_options is refreshed),
         // then fall back to config_option_current_label, then raw current_mode.
-        let mode_label = client
+        let mode_label = state
             .current_mode
             .as_deref()
-            .and_then(|m| find_label_for_value(&client.config_options, "mode", m))
-            .or_else(|| config_option_current_label(&client.config_options, "mode"))
+            .and_then(|m| find_label_for_value(&state.config_options, "mode", m))
+            .or_else(|| config_option_current_label(&state.config_options, "mode"))
             .or_else(|| {
-                client.current_mode.as_ref().map(|m| match m.as_str() {
+                state.current_mode.as_ref().map(|m| match m.as_str() {
                     "plan" | "planMode" => "plan".to_string(),
                     "default" | "edit" | "editMode" => "edit".to_string(),
                     "auto" | "acceptEdits" | "accept_edits" => "edit".to_string(),
@@ -481,7 +484,7 @@ impl Component for AgentPanel {
 
         // Combined usage: [{pct}% {ctx_used}/{ctx_size} | {in}/{out} ~{cache} | ${cost}]
         {
-            let su = &client.session_usage;
+            let su = &state.session_usage;
             let has_ctx = su.context_size > 0;
             let has_tokens = su.input_tokens > 0 || su.output_tokens > 0;
             let has_cost = su.cost_amount > 0.0 || !su.currency.is_empty();
@@ -520,8 +523,8 @@ impl Component for AgentPanel {
         }
         title.push(' ');
 
-        let is_prompting = client.is_prompting;
-        let has_commands = !client.available_commands.is_empty();
+        let is_prompting = state.is_prompting;
+        let has_commands = !state.available_commands.is_empty();
 
         surface.clear_with(area, popup_style);
         let block = Block::bordered()
@@ -559,7 +562,7 @@ impl Component for AgentPanel {
         // so they reflect word-wrap.  The cache is width-dependent and is cleared
         // whenever the content area width changes (e.g. terminal resize).
 
-        let display_len = client.display.len();
+        let display_len = state.display.len();
 
         // Invalidate cache on width change so heights are recomputed for new wrap.
         if inner.width != self.last_content_width {
@@ -579,7 +582,7 @@ impl Component for AgentPanel {
         // 2. Any in-progress ToolCall: async results can expand a ToolCall at any
         //    position (output arrives or the entry transitions to ToolDone), so
         //    everything from the first live ToolCall onward must be recomputed.
-        let first_live = client
+        let first_live = state
             .display
             .iter()
             .position(|e| matches!(e, DisplayLine::ToolCall { .. }))
@@ -587,7 +590,7 @@ impl Component for AgentPanel {
         let truncate_to = first_live.min(display_len.saturating_sub(2));
         self.line_heights.truncate(truncate_to);
 
-        for entry in &client.display[self.line_heights.len()..display_len] {
+        for entry in &state.display[self.line_heights.len()..display_len] {
             let h = Self::entry_height(
                 entry,
                 inner.width,
@@ -657,7 +660,7 @@ impl Component for AgentPanel {
         // spans for subsequent entries.
         let first_spans = if entry_start < display_len {
             Self::build_lines(
-                std::slice::from_ref(&client.display[entry_start]),
+                std::slice::from_ref(&state.display[entry_start]),
                 &cx.editor.theme,
                 &cx.editor.syn_loader,
                 thought_style,
@@ -670,7 +673,7 @@ impl Component for AgentPanel {
         let rest_start = (entry_start + 1).min(entry_end).min(display_len);
         let rest_spans = if rest_start < entry_end.min(display_len) {
             Self::build_lines(
-                &client.display[rest_start..entry_end.min(display_len)],
+                &state.display[rest_start..entry_end.min(display_len)],
                 &cx.editor.theme,
                 &cx.editor.syn_loader,
                 thought_style,
@@ -824,18 +827,20 @@ impl Component for AgentPanel {
         match key.code {
             // Cancel running agent (Esc).
             KeyCode::Esc => {
-                let client = cx.editor.acp.get(self.agent_id);
-                if let Some(client) = client {
-                    if client.is_prompting {
+                let is_prompting = cx.editor.acp.state(self.agent_id)
+                    .map_or(false, |s| s.is_prompting);
+                if is_prompting {
+                    if let Some(client) = cx.editor.acp.get(self.agent_id) {
                         if let Some(ref session_id) = client.session_id {
                             let session_id = session_id.clone();
                             let handle = client.handle();
                             let _ = handle.session_cancel(session_id);
                         }
-                        let client = cx.editor.acp.get_mut(self.agent_id).unwrap();
-                        client.is_prompting = false;
-                        cx.editor.set_status("Agent cancelled");
                     }
+                    if let Some(state) = cx.editor.acp.state_mut(self.agent_id) {
+                        state.is_prompting = false;
+                    }
+                    cx.editor.set_status("Agent cancelled");
                 }
                 EventResult::Consumed(None)
             }
@@ -964,12 +969,12 @@ impl Component for AgentPanel {
                     let agent_id = self.agent_id;
 
                     // Send /clear as a prompt so the agent clears its context too.
-                    let state = cx.editor.acp.get(agent_id).and_then(|c| {
+                    let rpc = cx.editor.acp.get(agent_id).and_then(|c| {
                         c.session_id.clone().map(|sid| (sid, c.handle()))
                     });
-                    if let Some((session_id, handle)) = state {
-                        if let Some(client) = cx.editor.acp.get_mut(agent_id) {
-                            client.is_prompting = true;
+                    if let Some((session_id, handle)) = rpc {
+                        if let Some(st) = cx.editor.acp.state_mut(agent_id) {
+                            st.is_prompting = true;
                         }
                         let prompt = vec![helix_acp::ContentBlock::Text { text }];
                         cx.jobs.callback(async move {
@@ -981,8 +986,8 @@ impl Component for AgentPanel {
                             {
                                 return Ok(Callback::Editor(Box::new(
                                     move |editor: &mut helix_view::Editor| {
-                                        if let Some(c) = editor.acp.get_mut(agent_id) {
-                                            c.is_prompting = false;
+                                        if let Some(s) = editor.acp.state_mut(agent_id) {
+                                            s.is_prompting = false;
                                         }
                                         editor.set_error(format!("Agent error: {e}"));
                                     },
@@ -990,9 +995,9 @@ impl Component for AgentPanel {
                             }
                             Ok(Callback::Editor(Box::new(
                                 move |editor: &mut helix_view::Editor| {
-                                    if let Some(c) = editor.acp.get_mut(agent_id) {
-                                        c.is_prompting = false;
-                                        c.display.clear();
+                                    if let Some(s) = editor.acp.state_mut(agent_id) {
+                                        s.is_prompting = false;
+                                        s.display.clear();
                                     }
                                     editor.set_status("Context cleared");
                                 },
@@ -1007,20 +1012,20 @@ impl Component for AgentPanel {
                 }
 
                 let agent_id = self.agent_id;
-                let state = cx.editor.acp.get(agent_id).and_then(|client| {
+                let rpc = cx.editor.acp.get(agent_id).and_then(|client| {
                     client.session_id.clone().map(|sid| {
                         (sid, client.handle())
                     })
                 });
 
-                if let Some((session_id, handle)) = state {
+                if let Some((session_id, handle)) = rpc {
                     {
-                        let client = cx.editor.acp.get_mut(agent_id).unwrap();
-                        if !client.display.is_empty() {
-                            client.display.push(helix_acp::DisplayLine::Separator);
+                        let st = cx.editor.acp.state_mut(agent_id).unwrap();
+                        if !st.display.is_empty() {
+                            st.display.push(helix_acp::DisplayLine::Separator);
                         }
-                        client.display.push(helix_acp::DisplayLine::UserMessage(text.clone()));
-                        client.is_prompting = true;
+                        st.display.push(helix_acp::DisplayLine::UserMessage(text.clone()));
+                        st.is_prompting = true;
                     }
                     helix_event::request_redraw();
                     let prompt = vec![helix_acp::ContentBlock::Text { text }];
@@ -1034,8 +1039,8 @@ impl Component for AgentPanel {
                             Err(e) => {
                                 return Ok(Callback::Editor(Box::new(
                                     move |editor: &mut helix_view::Editor| {
-                                        if let Some(c) = editor.acp.get_mut(agent_id) {
-                                            c.is_prompting = false;
+                                        if let Some(s) = editor.acp.state_mut(agent_id) {
+                                            s.is_prompting = false;
                                         }
                                         editor.set_error(format!("Agent error: {e}"));
                                     },
@@ -1046,8 +1051,8 @@ impl Component for AgentPanel {
 
                         Ok(Callback::Editor(Box::new(
                             move |editor: &mut helix_view::Editor| {
-                                if let Some(c) = editor.acp.get_mut(agent_id) {
-                                    c.is_prompting = false;
+                                if let Some(s) = editor.acp.state_mut(agent_id) {
+                                    s.is_prompting = false;
                                 }
                                 editor.set_status(format!("Agent done ({stop:?})"));
                             },
@@ -1089,9 +1094,9 @@ impl Component for AgentPanel {
             // Alt+/: show sent-message history picker.
             KeyCode::Char('/') if key.modifiers == KeyModifiers::ALT => {
                 let messages: Vec<String> = cx.editor.acp
-                    .get(self.agent_id)
-                    .map(|client| {
-                        client.display.iter()
+                    .state(self.agent_id)
+                    .map(|st| {
+                        st.display.iter()
                             .filter_map(|line| {
                                 if let helix_acp::DisplayLine::UserMessage(text) = line {
                                     Some(text.clone())
@@ -1197,12 +1202,12 @@ impl AgentPanel {
         use crate::ui::{MultiMenuItem, MultiMenu, PromptEvent};
         use helix_acp::sdk::{SessionConfigKind, SessionConfigSelectOptions};
 
-        let Some(client) = cx.editor.acp.get(self.agent_id) else {
+        let Some(st) = cx.editor.acp.state(self.agent_id) else {
             return EventResult::Consumed(None);
         };
 
         // Find the matching config option and extract its select options.
-        let select = client.config_options.iter().find_map(|opt| {
+        let select = st.config_options.iter().find_map(|opt| {
             if opt.id.to_string() == option_id {
                 if let SessionConfigKind::Select(sel) = &opt.kind {
                     return Some(sel.clone());
@@ -1236,15 +1241,15 @@ impl AgentPanel {
                 return;
             }
             if let Some(o) = flat_options.get(idx) {
-                if let Some(client) = editor.acp.get_mut(agent_id) {
-                    client.pending_config_change =
+                if let Some(st) = editor.acp.state_mut(agent_id) {
+                    st.pending_config_change =
                         Some((option_id.to_string(), o.value.to_string()));
                 }
             }
         })
         .with_on_close(move |_, cx| {
-            let change = cx.editor.acp.get_mut(agent_id)
-                .and_then(|c| c.pending_config_change.take());
+            let change = cx.editor.acp.state_mut(agent_id)
+                .and_then(|s| s.pending_config_change.take());
             if let Some((opt_id, value)) = change {
                 if let Some(client) = cx.editor.acp.get(agent_id) {
                     if let Some(sid) = client.session_id.clone() {
