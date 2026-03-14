@@ -8,6 +8,134 @@ use tui::widgets::{Block, Paragraph, Widget, Wrap};
 use crate::compositor::{Component, Context, EventResult};
 use crate::ui::TextArea;
 
+// ── Slash-command filter menu ─────────────────────────────────────────────────
+
+struct SlashMenuState {
+    /// All commands: (name_without_slash, description, needs_trailing_space).
+    all_items: Vec<(String, String, bool)>,
+    /// Indices into `all_items` that match the current filter query.
+    filtered: Vec<usize>,
+    /// Highlighted row within `filtered`.
+    cursor: usize,
+}
+
+impl SlashMenuState {
+    fn update_filter(&mut self, query: &str) {
+        let q = query.to_ascii_lowercase();
+        self.filtered = self
+            .all_items
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _, _))| name.to_ascii_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        // Clamp cursor so it stays within filtered range.
+        self.cursor = self
+            .cursor
+            .min(self.filtered.len().saturating_sub(1));
+    }
+
+    fn selected(&self) -> Option<&(String, String, bool)> {
+        self.filtered
+            .get(self.cursor)
+            .and_then(|&i| self.all_items.get(i))
+    }
+}
+
+/// Build the list of available slash commands for the given agent.
+fn build_slash_items(cx: &Context, agent_id: helix_acp::AgentId) -> Vec<(String, String, bool)> {
+    let builtins: &[(&str, &str)] = &[
+        ("exit",  "End session and close panel"),
+        ("clear", "Clear conversation context"),
+    ];
+    let mut items: Vec<(String, String, bool)> = builtins
+        .iter()
+        .map(|(n, d)| (n.to_string(), d.to_string(), false))
+        .collect();
+    if let Some(client) = cx.editor.acp.get(agent_id) {
+        for cmd in &client.available_commands {
+            items.push((cmd.name.clone(), cmd.description.clone(), cmd.input.is_some()));
+        }
+    }
+    items
+}
+
+/// Render the slash-command popup above (or below) `input_area`.
+fn render_slash_popup(
+    menu: &SlashMenuState,
+    input_area: Rect,
+    surface: &mut Surface,
+    cx: &mut Context,
+) {
+    if menu.filtered.is_empty() {
+        return;
+    }
+
+    let normal_style   = cx.editor.theme.get("ui.menu");
+    let selected_style = cx.editor.theme.get("ui.menu.selected");
+    let desc_style     = normal_style.add_modifier(Modifier::DIM);
+
+    // Each item takes 1 row: "▶ /name   description"
+    let visible_count = menu.filtered.len().min(6) as u16;
+    let popup_h = visible_count;
+
+    if popup_h == 0 || input_area.width < 4 {
+        return;
+    }
+
+    // Position: above input_area if there is room, otherwise below.
+    let popup_y = if input_area.y >= popup_h {
+        input_area.y - popup_h
+    } else {
+        input_area.y + input_area.height
+    };
+    let popup_area = Rect::new(input_area.x, popup_y, input_area.width, popup_h);
+
+    // Determine scroll offset so `cursor` is always visible.
+    let scroll_start = if menu.cursor >= visible_count as usize {
+        menu.cursor + 1 - visible_count as usize
+    } else {
+        0
+    };
+
+    for (row_idx, &item_idx) in menu.filtered
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(visible_count as usize)
+    {
+        let (name, desc, _) = &menu.all_items[item_idx];
+        let y = popup_area.y + (row_idx - scroll_start) as u16;
+        let is_selected = row_idx == menu.cursor;
+        let (prefix, row_style) = if is_selected {
+            ("▶ ", selected_style)
+        } else {
+            ("  ", normal_style)
+        };
+
+        // Clear the row.
+        surface.clear_with(
+            Rect::new(popup_area.x, y, popup_area.width, 1),
+            row_style,
+        );
+
+        let label = format!("{prefix}/{name}");
+        let label_width = label.chars().count() as u16;
+        surface.set_stringn(popup_area.x, y, &label, popup_area.width as usize, row_style);
+
+        // Description: right-aligned after a gap, dimmed.
+        if label_width + 2 < popup_area.width {
+            let desc_max = (popup_area.width - label_width - 2) as usize;
+            if !desc.is_empty() && desc_max > 0 {
+                let desc_x = popup_area.x + label_width + 2;
+                surface.set_stringn(desc_x, y, desc, desc_max, desc_style);
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub struct AgentPanel {
     pub agent_id: AgentId,
     scroll: usize,
@@ -29,6 +157,8 @@ pub struct AgentPanel {
     fullscreen: bool,
     /// Animation start time for gradient border animation (active while is_prompting).
     anim_start: Option<std::time::Instant>,
+    /// Active slash-command filter menu; `None` when not shown.
+    slash_menu: Option<SlashMenuState>,
 }
 
 impl AgentPanel {
@@ -49,6 +179,7 @@ impl AgentPanel {
             last_content_width: 0,
             fullscreen: false,
             anim_start: None,
+            slash_menu: None,
         }
     }
 
@@ -585,6 +716,11 @@ impl Component for AgentPanel {
 
         let text_style = cx.editor.theme.get("ui.text");
         self.input.render(input_area, surface, text_style);
+
+        // Render inline slash-command filter popup.
+        if let Some(m) = &self.slash_menu {
+            render_slash_popup(m, input_area, surface, cx);
+        }
     }
 
     fn cursor(&self, _area: Rect, _editor: &helix_view::Editor) -> (Option<Position>, CursorKind) {
@@ -602,16 +738,6 @@ impl Component for AgentPanel {
 
     fn handle_event(&mut self, event: &crate::compositor::Event, cx: &mut Context) -> EventResult {
         use helix_view::input::{Event, KeyCode, KeyModifiers};
-
-        // Drain any command selected from the command menu.
-        {
-            let pending = cx.editor.acp.get_mut(self.agent_id)
-                .and_then(|c| c.pending_command.take());
-            if let Some(cmd) = pending {
-                self.input.insert_str(&cmd);
-                return EventResult::Consumed(None);
-            }
-        }
 
         match event {
             // Paste: insert clipboard text at cursor.
@@ -651,6 +777,49 @@ impl Component for AgentPanel {
         let Event::Key(key) = event else {
             return EventResult::Ignored(None);
         };
+
+        // When the slash menu is open, intercept navigation / selection keys
+        // before the main match so they don't bleed through to the editor.
+        if self.slash_menu.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(m) = &mut self.slash_menu {
+                        m.cursor = m.cursor.saturating_sub(1);
+                    }
+                    return EventResult::Consumed(None);
+                }
+                KeyCode::Down => {
+                    if let Some(m) = &mut self.slash_menu {
+                        let max = m.filtered.len().saturating_sub(1);
+                        m.cursor = (m.cursor + 1).min(max);
+                    }
+                    return EventResult::Consumed(None);
+                }
+                // Plain Enter selects the highlighted command.
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(m) = &self.slash_menu {
+                        if let Some((name, _, needs_space)) = m.selected() {
+                            let text = if *needs_space {
+                                format!("/{} ", name)
+                            } else {
+                                format!("/{}", name)
+                            };
+                            self.input.clear();
+                            self.input.insert_str(&text);
+                        }
+                    }
+                    self.slash_menu = None;
+                    return EventResult::Consumed(None);
+                }
+                // Esc closes the menu and clears the slash input.
+                KeyCode::Esc => {
+                    self.input.clear();
+                    self.slash_menu = None;
+                    return EventResult::Consumed(None);
+                }
+                _ => {}
+            }
+        }
 
         match key.code {
             // Cancel running agent (Esc).
@@ -746,6 +915,7 @@ impl Component for AgentPanel {
             // Backspace: delete previous grapheme.
             KeyCode::Backspace => {
                 self.input.delete_before();
+                self.update_slash_menu_from_input(cx);
                 EventResult::Consumed(None)
             }
 
@@ -896,67 +1066,19 @@ impl Component for AgentPanel {
                 EventResult::Consumed(None)
             }
 
-            // '/': open slash-command menu when input is empty and this is the first char.
+            // '/': insert the character and open (or refresh) the inline slash menu.
             KeyCode::Char('/') if key.modifiers.is_empty() => {
-                // If there is already text in the input, treat '/' as a regular character.
-                if !self.input.text().is_empty() {
-                    self.input.insert_char('/');
-                    return EventResult::Consumed(None);
-                }
-
-                // Builtin local commands, always shown regardless of agent state.
-                let builtins: &[(&str, &str)] = &[
-                    ("exit",  "End session and close panel"),
-                    ("clear", "Clear conversation context"),
-                ];
-                let builtin_count = builtins.len();
-
-                let agent_commands = cx.editor.acp.get(self.agent_id)
-                    .map(|c| c.available_commands.clone())
-                    .unwrap_or_default();
-
-                let mut items: Vec<crate::ui::MultiMenuItem> = builtins
-                    .iter()
-                    .map(|(name, desc)| crate::ui::MultiMenuItem {
-                        label:    format!("/{name}"),
-                        sublabel: Some((*desc).to_string()),
-                    })
-                    .collect();
-                items.extend(agent_commands.iter().map(|cmd| crate::ui::MultiMenuItem {
-                    label:    format!("/{}", cmd.name),
-                    sublabel: Some(cmd.description.clone()),
-                }));
-
-                // Side-channel: validate callback records the chosen text;
-                // on_close callback reads it and inserts into the panel input.
-                // Rc is fine here — these closures are 'static but not Send.
-                let selected = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
-                let selected_for_close = selected.clone();
-
-                let menu = crate::ui::MultiMenu::new(items, move |_editor, idx, event| {
-                    use crate::ui::PromptEvent;
-                    if event != PromptEvent::Validate { return; }
-                    let text = if idx < builtin_count {
-                        Some(format!("/{}", builtins[idx].0))
-                    } else {
-                        agent_commands.get(idx - builtin_count).map(|cmd| {
-                            if cmd.input.is_some() { format!("/{} ", cmd.name) }
-                            else                   { format!("/{}", cmd.name) }
-                        })
-                    };
-                    *selected.borrow_mut() = text;
-                })
-                .with_on_close(move |compositor, _cx| {
-                    if let Some(text) = selected_for_close.borrow_mut().take() {
-                        if let Some(panel) = compositor.find_id::<AgentPanel>(AgentPanel::ID) {
-                            panel.insert_input_text(&text);
-                        }
-                    }
-                });
-
-                EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
-                    compositor.push(Box::new(menu));
-                })))
+                self.input.insert_char('/');
+                let mut state = SlashMenuState {
+                    all_items: build_slash_items(cx, self.agent_id),
+                    filtered: vec![],
+                    cursor: 0,
+                };
+                // Show all commands initially (empty filter after the '/').
+                let query = self.input.text().strip_prefix('/').unwrap_or("");
+                state.update_filter(query);
+                self.slash_menu = Some(state);
+                EventResult::Consumed(None)
             }
 
             // Alt+M: open model picker.
@@ -1034,6 +1156,7 @@ impl Component for AgentPanel {
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.input.insert_char(c);
+                self.update_slash_menu_from_input(cx);
                 EventResult::Consumed(None)
             }
 
@@ -1048,9 +1171,29 @@ impl AgentPanel {
     }
 
     /// Insert `text` at the current cursor position in the input field.
-    /// Used by the slash-command menu's `on_close` hook to avoid a second keypress.
     pub fn insert_input_text(&mut self, text: &str) {
         self.input.insert_str(text);
+    }
+
+    /// Update (or dismiss) the slash menu based on the current input text.
+    /// Called after any keystroke that modifies the input.
+    fn update_slash_menu_from_input(&mut self, cx: &Context) {
+        let text = self.input.text().to_string();
+        if let Some(query) = text.strip_prefix('/') {
+            if let Some(m) = &mut self.slash_menu {
+                m.update_filter(query);
+            } else {
+                let mut state = SlashMenuState {
+                    all_items: build_slash_items(cx, self.agent_id),
+                    filtered: vec![],
+                    cursor: 0,
+                };
+                state.update_filter(query);
+                self.slash_menu = Some(state);
+            }
+        } else {
+            self.slash_menu = None;
+        }
     }
 
     /// Open a picker menu for a session config option (e.g. "model" or "mode").
