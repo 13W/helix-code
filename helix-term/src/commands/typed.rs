@@ -2960,8 +2960,8 @@ fn agent_cancel(
         .session_cancel(session_id)
         .map_err(|e| anyhow::anyhow!("cancel failed: {e}"))?;
 
-    if let Some(client) = cx.editor.acp.get_mut(agent_id) {
-        client.is_prompting = false;
+    if let Some(state) = cx.editor.acp.state_mut(agent_id) {
+        state.is_prompting = false;
     }
     cx.editor.set_status("Agent cancelled");
     Ok(())
@@ -3000,11 +3000,11 @@ fn agent_prompt(
     let (session_id, handle) = resolve_agent_handle(cx, agent_id)?;
 
     {
-        let client = cx.editor.acp.get_mut(agent_id).unwrap();
-        if !client.display.is_empty() {
-            client.display.push(helix_acp::DisplayLine::Separator);
+        let state = cx.editor.acp.state_mut(agent_id).unwrap();
+        if !state.display.is_empty() {
+            state.display.push(helix_acp::DisplayLine::Separator);
         }
-        client.is_prompting = true;
+        state.is_prompting = true;
     }
 
 
@@ -3034,8 +3034,8 @@ fn agent_prompt(
         {
             Err(e) => {
                 return Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
-                    if let Some(client) = editor.acp.get_mut(agent_id) {
-                        client.is_prompting = false;
+                    if let Some(s) = editor.acp.state_mut(agent_id) {
+                        s.is_prompting = false;
                     }
                     editor.set_error(format!("Agent error: {e}"));
                 })));
@@ -3044,8 +3044,8 @@ fn agent_prompt(
         };
 
         Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
-            if let Some(client) = editor.acp.get_mut(agent_id) {
-                client.is_prompting = false;
+            if let Some(s) = editor.acp.state_mut(agent_id) {
+                s.is_prompting = false;
             }
             editor.set_status(format!("Agent done ({stop:?})"));
         })))

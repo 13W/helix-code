@@ -83,62 +83,6 @@ pub struct Application {
     mcp_rx: Option<tokio::sync::mpsc::Receiver<helix_mcp::McpCommand>>,
 }
 
-/// Format tool call arguments for display in the agent panel.
-///
-/// Priority:
-/// 1. `locations` — file paths from the tool call (e.g. for Read/Edit tools)
-/// 2. `raw_input` object — string/number values joined with ", "
-///
-/// Returns an empty string when no useful data is available.
-fn format_tool_input(
-    raw_input: Option<&serde_json::Value>,
-    locations: &[helix_acp::sdk::ToolCallLocation],
-) -> String {
-    // Prefer file locations (most human-readable).
-    if !locations.is_empty() {
-        let parts: Vec<String> = locations
-            .iter()
-            .map(|l| {
-                l.path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| l.path.to_string_lossy().into_owned())
-            })
-            .collect();
-        let joined = parts.join(", ");
-        let truncated = if joined.len() > 60 {
-            let end = joined.char_indices().nth(57).map(|(i, _)| i).unwrap_or(joined.len());
-            format!("{}…", &joined[..end])
-        } else {
-            joined
-        };
-        return truncated;
-    }
-
-    // Fall back to raw_input object values.
-    if let Some(serde_json::Value::Object(map)) = raw_input {
-        let parts: Vec<String> = map
-            .values()
-            .filter_map(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-            .collect();
-        if !parts.is_empty() {
-            let joined = parts.join(", ");
-            let truncated = if joined.len() > 60 {
-                let end = joined.char_indices().nth(57).map(|(i, _)| i).unwrap_or(joined.len());
-                format!("{}…", &joined[..end])
-            } else {
-                joined
-            };
-            return truncated;
-        }
-    }
-
-    String::new()
-}
 
 #[cfg(feature = "integration")]
 fn setup_integration_logging() {
@@ -962,7 +906,7 @@ impl Application {
                         .map_err(anyhow::Error::from)
                         .map(|_| {
                             if self.editor.document_by_path(&path).is_some() {
-                                Self::reload_document_by_path(&mut self.editor, &path);
+                                self.editor.acp_reload_document(&path);
                             } else if self.editor.mcp_trace {
                                 if let Err(e) =
                                     self.editor.open(&path, helix_view::editor::Action::Load)
@@ -1005,7 +949,7 @@ impl Application {
                                     .map_err(anyhow::Error::from)
                                     .map(|_| {
                                         if editor.document_by_path(&path2).is_some() {
-                                            Self::reload_document_by_path(editor, &path2);
+                                            editor.acp_reload_document(&path2);
                                         } else if editor.mcp_trace {
                                             let _ = editor
                                                 .open(&path2, helix_view::editor::Action::Load);
@@ -1119,7 +1063,7 @@ impl Application {
                         .map_err(anyhow::Error::from)
                         .map(|_| {
                             if self.editor.document_by_path(&path).is_some() {
-                                Self::reload_document_by_path(&mut self.editor, &path);
+                                self.editor.acp_reload_document(&path);
                             } else if self.editor.mcp_trace {
                                 if let Err(e) =
                                     self.editor.open(&path, helix_view::editor::Action::Load)
@@ -1163,7 +1107,7 @@ impl Application {
                                     .map_err(anyhow::Error::from)
                                     .map(|_| {
                                         if editor.document_by_path(&path2).is_some() {
-                                            Self::reload_document_by_path(editor, &path2);
+                                            editor.acp_reload_document(&path2);
                                         } else if editor.mcp_trace {
                                             let _ = editor
                                                 .open(&path2, helix_view::editor::Action::Load);
@@ -3767,531 +3711,152 @@ impl Application {
         agent_id: helix_acp::AgentId,
         event: helix_acp::AcpEvent,
     ) {
-        use helix_acp::AcpEvent;
-        match event {
-            AcpEvent::SessionNotification(notif) => {
-                use helix_acp::{
-                    sdk::{ContentBlock, PlanEntryStatus, SessionUpdate, ToolCallStatus, ToolKind},
-                    DisplayLine,
-                };
+        use helix_view::handlers::acp::AcpSideEffect;
 
-                // Collected outside the client borrow so we can act after releasing it.
-                let mut paths_to_reload: Vec<std::path::PathBuf> = Vec::new();
-                let mut paths_to_open: Vec<std::path::PathBuf> = Vec::new();
+        let side_effect = self.editor.handle_acp_event(agent_id, event);
 
-                let Some(client) = self.editor.acp.get_mut(agent_id) else {
-                    return;
-                };
-
-                match notif.update {
-                    SessionUpdate::AgentMessageChunk(chunk)
-                    | SessionUpdate::UserMessageChunk(chunk) => {
-                        if let ContentBlock::Text(tc) = chunk.content {
-                            if !tc.text.is_empty() {
-                                match client.display.last_mut() {
-                                    Some(DisplayLine::Text(s)) => s.push_str(&tc.text),
-                                    _ => client.display.push(DisplayLine::Text(tc.text)),
-                                }
-                            }
-                        }
-                    }
-                    SessionUpdate::AgentThoughtChunk(chunk) => {
-                        if let ContentBlock::Text(tc) = chunk.content {
-                            if !tc.text.is_empty() {
-                                match client.display.last_mut() {
-                                    Some(DisplayLine::Thought(s)) => s.push_str(&tc.text),
-                                    _ => client.display.push(DisplayLine::Thought(tc.text)),
-                                }
-                            }
-                        }
-                    }
-                    SessionUpdate::ToolCall(tc) => {
-                        let id_s = tc.tool_call_id.to_string();
-                        // Track edit tool calls for later buffer reload.
-                        if tc.kind == ToolKind::Edit {
-                            let paths: Vec<String> = tc
-                                .locations
-                                .iter()
-                                .map(|l| l.path.to_string_lossy().into_owned())
-                                .collect();
-                            client.pending_edits.insert(id_s.clone(), paths);
-                        }
-                        // Queue read locations to open in the editor.
-                        if tc.kind == ToolKind::Read {
-                            for loc in &tc.locations {
-                                paths_to_open.push(loc.path.clone());
-                            }
-                        }
-                        let input = format_tool_input(tc.raw_input.as_ref(), &tc.locations);
-                        client.display.push(DisplayLine::ToolCall {
-                            id: id_s,
-                            name: tc.title,
-                            input,
-                            output: Vec::new(),
-                        });
-                    }
-                    SessionUpdate::ToolCallUpdate(update) => {
-                        let id_s = update.tool_call_id.to_string();
-                        // Collect paths from locations + rawInput.file_path (Write tool).
-                        let mut new_paths: Vec<String> = update
-                            .fields
-                            .locations
-                            .as_deref()
-                            .unwrap_or(&[])
-                            .iter()
-                            .map(|l| l.path.to_string_lossy().into_owned())
-                            .collect();
-                        if let Some(fp) = update
-                            .fields
-                            .raw_input
-                            .as_ref()
-                            .and_then(|ri| ri["file_path"].as_str())
-                        {
-                            let fp = fp.to_string();
-                            if !new_paths.contains(&fp) {
-                                new_paths.push(fp);
-                            }
-                        }
-                        if !new_paths.is_empty() {
-                            let entry =
-                                client.pending_edits.entry(id_s.clone()).or_default();
-                            for p in &new_paths {
-                                if !entry.contains(p) {
-                                    entry.push(p.clone());
-                                }
-                            }
-                        }
-                        // Extract text lines from content blocks for display.
-                        let new_output: Vec<String> = update
-                            .fields
-                            .content
-                            .as_deref()
-                            .unwrap_or(&[])
-                            .iter()
-                            .filter_map(|c| {
-                                use helix_acp::sdk::ToolCallContent;
-                                match c {
-                                    ToolCallContent::Content(c) => {
-                                        if let helix_acp::sdk::ContentBlock::Text(t) = &c.content {
-                                            Some(t.text.clone())
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    ToolCallContent::Diff(diff) => {
-                                        Some(format!("~ {}", diff.path.display()))
-                                    }
-                                    _ => None,
-                                }
-                            })
-                            .flat_map(|s| s.lines().map(|l| l.to_string()).collect::<Vec<_>>())
-                            .collect();
-                        // Step A: accumulate output on in-flight ToolCall entry.
-                        if !new_output.is_empty() {
-                            if let Some(pos) = client.display.iter_mut().position(|l| {
-                                matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
-                            }) {
-                                if let DisplayLine::ToolCall { output, .. } =
-                                    &mut client.display[pos]
-                                {
-                                    *output = new_output.clone();
-                                }
-                            }
-                        }
-                        // Step A2: update name/input on in-flight ToolCall when update provides them.
-                        if let Some(pos) = client.display.iter_mut().position(|l| {
-                            matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
-                        }) {
-                            if let DisplayLine::ToolCall { name, input, .. } =
-                                &mut client.display[pos]
-                            {
-                                if let Some(new_title) = &update.fields.title {
-                                    *name = new_title.clone();
-                                }
-                                let new_input = format_tool_input(
-                                    update.fields.raw_input.as_ref(),
-                                    update.fields.locations.as_deref().unwrap_or(&[]),
-                                );
-                                if !new_input.is_empty() {
-                                    *input = new_input;
-                                }
-                            }
-                        }
-                        // Step B: only flip to ToolDone on an explicit terminal status.
-                        let is_terminal = matches!(
-                            &update.fields.status,
-                            Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
-                        );
-                        if is_terminal {
-                            let status_str = match &update.fields.status {
-                                Some(ToolCallStatus::Failed) => "failed".to_string(),
-                                _ => "done".to_string(),
-                            };
-                            if let Some(pos) = client.display.iter().position(|l| {
-                                matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
-                            }) {
-                                let (name, prev_input, accumulated_output) =
-                                    if let DisplayLine::ToolCall { name, input, output, .. } =
-                                        &client.display[pos]
-                                    {
-                                        (name.clone(), input.clone(), output.clone())
-                                    } else {
-                                        (String::new(), String::new(), Vec::new())
-                                    };
-                                // Prefer update's raw_input/locations; fall back to original.
-                                let update_input = format_tool_input(
-                                    update.fields.raw_input.as_ref(),
-                                    update.fields.locations.as_deref().unwrap_or(&[]),
-                                );
-                                let input = if update_input.is_empty() {
-                                    prev_input
-                                } else {
-                                    update_input
-                                };
-                                // Use current update's content if present, else accumulated.
-                                let final_output = if !new_output.is_empty() {
-                                    new_output
-                                } else {
-                                    accumulated_output
-                                };
-                                client.display[pos] = DisplayLine::ToolDone {
-                                    id: id_s.clone(),
-                                    name,
-                                    input,
-                                    status: status_str,
-                                    output: final_output,
-                                };
-                            }
-                        }
-                        // On completion: collect paths for reload.
-                        if update.fields.status == Some(ToolCallStatus::Completed) {
-                            if let Some(paths) = client.pending_edits.remove(&id_s) {
-                                paths_to_reload.extend(
-                                    paths.into_iter().map(std::path::PathBuf::from),
-                                );
-                            }
-                        }
-                    }
-                    SessionUpdate::Plan(plan) => {
-                        // Replace all existing plan steps and re-push updated ones.
-                        client
-                            .display
-                            .retain(|l| !matches!(l, DisplayLine::PlanStep { .. }));
-                        for entry in plan.entries {
-                            client.display.push(DisplayLine::PlanStep {
-                                done: entry.status == PlanEntryStatus::Completed,
-                                description: entry.content,
-                            });
-                        }
-                    }
-                    SessionUpdate::CurrentModeUpdate(cmu) => {
-                        client.current_mode = Some(cmu.current_mode_id.to_string());
-                    }
-                    SessionUpdate::AvailableCommandsUpdate(acu) => {
-                        client.available_commands = acu.available_commands;
-                    }
-                    SessionUpdate::ConfigOptionUpdate(cou) => {
-                        client.config_options = cou.config_options;
-                    }
-                    SessionUpdate::UsageUpdate(uu) => {
-                        if let Some(cost) = uu.cost {
-                            client.session_usage.cost_amount = cost.amount;
-                            client.session_usage.currency = cost.currency;
-                        }
-                        client.session_usage.context_used = uu.used;
-                        client.session_usage.context_size = uu.size;
-                    }
-                    _ => {}
-                }
-                helix_event::request_redraw();
-
-                // Open files the bot is reading so they're visible in the editor.
-                for path in paths_to_open {
-                    if let Err(e) =
-                        self.editor.open(&path, helix_view::editor::Action::Load)
-                    {
-                        log::warn!("ACP: could not open {}: {e}", path.display());
-                    }
-                }
-
-                // Reload files the bot has written; open them first if not yet loaded.
-                // Switch the current view to the first edited file so the user sees the result.
-                let mut first_edit = true;
-                for path in paths_to_reload {
-                    if self.editor.document_by_path(&path).is_none() {
-                        if let Err(e) =
-                            self.editor.open(&path, helix_view::editor::Action::Load)
-                        {
-                            log::warn!("ACP: could not open {}: {e}", path.display());
-                            continue;
-                        }
-                    }
-                    if first_edit {
-                        if let Some(doc_id) =
-                            self.editor.document_by_path(&path).map(|d| d.id())
-                        {
-                            self.editor
-                                .switch(doc_id, helix_view::editor::Action::Replace);
-                        }
-                        first_edit = false;
-                    }
-                    Self::reload_document_by_path(&mut self.editor, &path);
-                }
+        match side_effect {
+            AcpSideEffect::None => {}
+            AcpSideEffect::PermissionDialog {
+                agent_id,
+                params,
+                reply,
+            } => {
+                self.show_acp_permission_dialog(agent_id, params, reply);
             }
+        }
+    }
 
-            AcpEvent::RequestPermission { params, reply } => {
-                use helix_acp::sdk::{
-                    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionResponse,
-                    SelectedPermissionOutcome,
-                };
+    /// Build and push the permission-request Select dialog onto the compositor.
+    fn show_acp_permission_dialog(
+        &mut self,
+        agent_id: helix_acp::AgentId,
+        params: helix_acp::sdk::RequestPermissionRequest,
+        reply: helix_acp::ReplyChannel<helix_acp::sdk::RequestPermissionResponse>,
+    ) {
+        use helix_acp::sdk::{
+            PermissionOptionKind, RequestPermissionOutcome, RequestPermissionResponse,
+            SelectedPermissionOutcome,
+        };
 
-                if params.options.is_empty() {
-                    let _ = reply.lock().unwrap().take().map(|tx| {
-                        let _ = tx.send(RequestPermissionResponse::new(
-                            RequestPermissionOutcome::Cancelled,
-                        ));
-                    });
-                    return;
-                }
+        if params.options.is_empty() {
+            let _ = reply.lock().unwrap().take().map(|tx| {
+                let _ = tx.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+            });
+            return;
+        }
 
-                // Clone the Arc so the Select callback can set auto_continue without
-                // holding a borrow on the editor.
-                let auto_continue_arc = self
-                    .editor
-                    .acp
-                    .get(agent_id)
-                    .map(|c| c.auto_continue.clone());
+        // Clone the Arc so the Select callback can set auto_continue without
+        // holding a borrow on the editor.
+        let auto_continue_arc = self
+            .editor
+            .acp
+            .state(agent_id)
+            .map(|s| s.auto_continue.clone());
 
-                let title = params
-                    .tool_call
-                    .fields
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Permission required".to_string());
+        let title = params
+            .tool_call
+            .fields
+            .title
+            .clone()
+            .unwrap_or_else(|| "Permission required".to_string());
 
-                // Extract plan text from rawInput.plan (if present) for two purposes:
-                // 1. Push it to the display buffer so it appears in the agent panel.
-                // 2. Offer an "Apply (clean context)" option in the permission dialog.
-                let plan_text = params
-                    .tool_call
-                    .fields
-                    .raw_input
-                    .as_ref()
-                    .and_then(|ri| ri["plan"].as_str())
-                    .map(|s| s.to_string());
+        // Check for plan text to offer "Apply (clean context)" option.
+        let plan_text = params
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .and_then(|ri| ri["plan"].as_str())
+            .is_some();
 
-                if let Some(ref plan) = plan_text {
-                    if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                        client.display.push(helix_acp::DisplayLine::Text(plan.clone()));
-                    }
-                }
+        let allow_always_id = params
+            .options
+            .iter()
+            .find(|o| o.kind == PermissionOptionKind::AllowAlways)
+            .or_else(|| params.options.first())
+            .map(|o| o.option_id.to_string())
+            .unwrap_or_default();
+        let mut items: Vec<PermOption> = params
+            .options
+            .into_iter()
+            .map(PermOption::Agent)
+            .collect();
+        if plan_text {
+            items.insert(0, PermOption::CleanContext {
+                allow_always_id: allow_always_id.clone(),
+            });
+        }
+        // Reorder: CleanContext first, then Allow, then AllowAlways.
+        items.sort_by_key(|item| match item {
+            PermOption::CleanContext { .. } => 0,
+            PermOption::Agent(opt)
+                if opt.kind == PermissionOptionKind::AllowAlways =>
+            {
+                2
+            }
+            PermOption::Agent(_) => 1,
+        });
 
-                // is present.
-                let allow_always_id = params
-                    .options
-                    .iter()
-                    .find(|o| o.kind == PermissionOptionKind::AllowAlways)
-                    .or_else(|| params.options.first())
-                    .map(|o| o.option_id.to_string())
-                    .unwrap_or_default();
-                let mut items: Vec<PermOption> = params
-                    .options
-                    .into_iter()
-                    .map(PermOption::Agent)
-                    .collect();
-                if plan_text.is_some() {
-                    items.insert(0, PermOption::CleanContext {
-                        allow_always_id: allow_always_id.clone(),
-                    });
-                }
-                // Reorder: CleanContext first, then Allow, then AllowAlways.
-                items.sort_by_key(|item| match item {
-                    PermOption::CleanContext { .. } => 0,
-                    PermOption::Agent(opt)
-                        if opt.kind == PermissionOptionKind::AllowAlways =>
-                    {
-                        2
-                    }
-                    PermOption::Agent(_) => 1,
-                });
-
-                let select = ui::Select::new(
-                    title,
-                    items,
-                    (),
-                    move |editor, option: &PermOption, event| {
-                        use crate::ui::PromptEvent;
-                        let response = match event {
-                            PromptEvent::Update => return,
-                            PromptEvent::Validate => match option {
-                                PermOption::CleanContext { allow_always_id } => {
-                                    // Side effects same as AllowAlways.
-                                    if let Some(ref ac) = auto_continue_arc {
-                                        ac.store(
-                                            true,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        );
-                                    }
-                                    if let Some(client) = editor.acp.get_mut(agent_id) {
-                                        client.auto_accept_edits = true;
-                                        // Defer: send /clear first, then reply.
-                                        client.pending_clean_context_reply =
-                                            Some((reply.clone(), allow_always_id.clone()));
-                                    }
-                                    return; // reply is sent asynchronously
+        let select = ui::Select::new(
+            title,
+            items,
+            (),
+            move |editor, option: &PermOption, event| {
+                use crate::ui::PromptEvent;
+                let response = match event {
+                    PromptEvent::Update => return,
+                    PromptEvent::Validate => match option {
+                        PermOption::CleanContext { allow_always_id } => {
+                            if let Some(ref ac) = auto_continue_arc {
+                                ac.store(
+                                    true,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                            }
+                            if let Some(state) = editor.acp.state_mut(agent_id) {
+                                state.auto_accept_edits = true;
+                                state.pending_clean_context_reply =
+                                    Some((reply.clone(), allow_always_id.clone()));
+                            }
+                            return;
+                        }
+                        PermOption::Agent(opt) => {
+                            if opt.kind == PermissionOptionKind::AllowAlways {
+                                if let Some(ref ac) = auto_continue_arc {
+                                    ac.store(
+                                        true,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                    );
                                 }
-                                PermOption::Agent(opt) => {
-                                    // When the user picks "always allow", signal the job to
-                                    // auto-continue after the current turn ends.
-                                    if opt.kind == PermissionOptionKind::AllowAlways {
-                                        if let Some(ref ac) = auto_continue_arc {
-                                            ac.store(
-                                                true,
-                                                std::sync::atomic::Ordering::SeqCst,
-                                            );
-                                        }
-                                        if let Some(client) = editor.acp.get_mut(agent_id) {
-                                            client.auto_accept_edits = true;
-                                        }
-                                    }
-                                    RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Selected(
-                                            SelectedPermissionOutcome::new(
-                                                opt.option_id.clone(),
-                                            ),
-                                        ),
-                                    )
+                                if let Some(state) = editor.acp.state_mut(agent_id) {
+                                    state.auto_accept_edits = true;
                                 }
-                            },
-                            PromptEvent::Abort => RequestPermissionResponse::new(
-                                RequestPermissionOutcome::Cancelled,
-                            ),
-                        };
-                        let _ = reply.lock().unwrap().take().map(|tx| tx.send(response));
+                            }
+                            RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Selected(
+                                    SelectedPermissionOutcome::new(
+                                        opt.option_id.clone(),
+                                    ),
+                                ),
+                            )
+                        }
                     },
-                )
-                .no_auto_close()
-                .with_id("acp-permission");
-
-                self.compositor.replace_or_push("acp-permission", select);
-                // Do NOT send a reply here — the Select callback sends it.
-            }
-
-            AcpEvent::ReadTextFile { params, reply } => {
-                let result = std::fs::read_to_string(&params.path);
-                let response = match result {
-                    Ok(content) => helix_acp::sdk::ReadTextFileResponse::new(content),
-                    Err(e) => {
-                        log::warn!(
-                            "ACP {agent_id}: fs/read_text_file error for {}: {e}",
-                            params.path.display()
-                        );
-                        // SDK doesn't have an error response for this; send empty content.
-                        helix_acp::sdk::ReadTextFileResponse::new("")
-                    }
+                    PromptEvent::Abort => RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ),
                 };
                 let _ = reply.lock().unwrap().take().map(|tx| tx.send(response));
-            }
+            },
+        )
+        .no_auto_close()
+        .with_id("acp-permission");
 
-            AcpEvent::WriteTextFile { params, reply } => {
-                let path = params.path.clone();
-                let write_ok = std::fs::write(&params.path, &params.content).is_ok();
-                if !write_ok {
-                    log::warn!(
-                        "ACP {agent_id}: fs/write_text_file error for {}",
-                        params.path.display()
-                    );
-                }
-                let _ = reply
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .map(|tx| tx.send(helix_acp::sdk::WriteTextFileResponse::new()));
-
-                if write_ok {
-                    // Open or reload the written file in the editor so it appears in the buffer list.
-                    if self.editor.document_by_path(&path).is_none() {
-                        if let Err(e) =
-                            self.editor.open(&path, helix_view::editor::Action::Load)
-                        {
-                            log::warn!(
-                                "ACP: could not open written file {}: {e}",
-                                path.display()
-                            );
-                        }
-                    } else {
-                        Self::reload_document_by_path(&mut self.editor, &path);
-                    }
-                }
-            }
-
-            AcpEvent::Disconnected => {
-                log::info!("ACP agent {agent_id} disconnected");
-                self.editor.acp.stop_agent(agent_id);
-            }
-            AcpEvent::UsageUpdate { used, size, amount, currency } => {
-                if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                    client.session_usage.cost_amount = amount;
-                    client.session_usage.currency = currency;
-                    client.session_usage.context_used = used;
-                    client.session_usage.context_size = size;
-                }
-                helix_event::request_redraw();
-            }
-
-            AcpEvent::TurnTokens { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } => {
-                if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                    client.session_usage.input_tokens += input_tokens;
-                    client.session_usage.output_tokens += output_tokens;
-                    client.session_usage.cache_read_tokens += cache_read_tokens;
-                    client.session_usage.cache_write_tokens += cache_write_tokens;
-                }
-                helix_event::request_redraw();
-            }
-
-            AcpEvent::ConfigOptionsUpdate(opts) => {
-                if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                    client.config_options = opts;
-                }
-                helix_event::request_redraw();
-            }
-        }
+        self.compositor.replace_or_push("acp-permission", select);
     }
 
-    /// Reload an open document by its filesystem path.
-    ///
-    /// Called after an ACP agent writes a file so the editor buffer reflects the new content.
-    /// No-op if the file is not currently open.
-    fn reload_document_by_path(editor: &mut helix_view::Editor, path: &std::path::Path) {
-        let Some(doc) = editor.document_by_path(path) else {
-            return;
-        };
-        let doc_id = doc.id();
-        let view_id = match doc.selections().keys().next().copied() {
-            Some(v) => v,
-            None => return,
-        };
-        let scrolloff = editor.config().scrolloff;
-
-        // Borrow `tree`, `documents`, and `diff_providers` as disjoint fields.
-        let view = editor.tree.get_mut(view_id);
-        let doc = editor.documents.get_mut(&doc_id).unwrap();
-        view.sync_changes(doc);
-        if let Err(e) = doc.reload(view, &editor.diff_providers) {
-            log::warn!("ACP: reload failed for {}: {e}", path.display());
-            return;
-        }
-        view.ensure_cursor_in_view(doc, scrolloff);
-
-        // Notify LSP about the on-disk change.
-        let doc = editor.documents.get(&doc_id).unwrap();
-        if let Some(p) = doc.path().map(|p| p.to_owned()) {
-            editor
-                .language_servers
-                .file_event_handler
-                .file_changed(p);
-        }
-    }
 
     /// If MCP trace mode is enabled, switch to the document at `path` and
     /// jump the cursor to `target_line` (0-indexed), centering the view.
@@ -4388,9 +3953,9 @@ impl Application {
             let pending_ids: Vec<helix_acp::AgentId> = self
                 .editor
                 .acp
-                .iter()
-                .filter_map(|(id, c)| {
-                    if c.pending_clean_context_reply.is_some() {
+                .iter_states()
+                .filter_map(|(id, s)| {
+                    if s.pending_clean_context_reply.is_some() {
                         Some(id)
                     } else {
                         None
@@ -4402,15 +3967,15 @@ impl Application {
                 .filter_map(|id| {
                     self.editor
                         .acp
-                        .get_mut(id)
-                        .and_then(|c| c.pending_clean_context_reply.take())
+                        .state_mut(id)
+                        .and_then(|s| s.pending_clean_context_reply.take())
                         .map(|(reply, allow_id)| (id, reply, allow_id))
                 })
                 .collect();
 
 for (agent_id, reply, allow_always_id) in pending {
-                if let Some(client) = self.editor.acp.get_mut(agent_id) {
-                    client.is_prompting = true;
+                if let Some((client, state)) = self.editor.acp.client_and_state_mut(agent_id) {
+                    state.is_prompting = true;
                     let handle = client.handle();
                     let session_id = client.session_id.clone();
                     self.jobs.callback(async move {
@@ -4419,8 +3984,8 @@ for (agent_id, reply, allow_always_id) in pending {
                             Some(s) => s,
                             None => {
                                 return Ok(Callback::Editor(Box::new(move |editor| {
-                                    if let Some(c) = editor.acp.get_mut(agent_id) {
-                                        c.is_prompting = false;
+                                    if let Some(s) = editor.acp.state_mut(agent_id) {
+                                        s.is_prompting = false;
                                     }
                                     editor.set_error("no active session");
                                 })));
@@ -4446,8 +4011,8 @@ for (agent_id, reply, allow_always_id) in pending {
                                 ))
                             });
                         Ok(Callback::Editor(Box::new(move |editor| {
-                            if let Some(c) = editor.acp.get_mut(agent_id) {
-                                c.is_prompting = false;
+                            if let Some(s) = editor.acp.state_mut(agent_id) {
+                                s.is_prompting = false;
                             }
                             if let Err(e) = clear_result {
                                 editor.set_error(format!("clear failed: {e}"));

@@ -7351,7 +7351,9 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                             client.capabilities = Some(caps);
                             client.session_id = Some(sid.clone());
                             client.auth_methods = auth_methods;
-                            client.config_options = config_options;
+                        }
+                        if let Some(state) = editor.acp.state_mut(agent_id) {
+                            state.config_options = config_options;
                             if let Some(ref info) = account_info {
                                 let line = match (&info.email, &info.name) {
                                     (Some(e), Some(n)) => format!("Logged in as: {n} <{e}>"),
@@ -7360,11 +7362,11 @@ fn start_agent_session(cx: &mut compositor::Context, resume_id: Option<String>) 
                                     _ => String::new(),
                                 };
                                 if !line.is_empty() {
-                                    client.display.push(helix_acp::DisplayLine::Text(line));
-                                    client.display.push(helix_acp::DisplayLine::Separator);
+                                    state.display.push(helix_acp::DisplayLine::Text(line));
+                                    state.display.push(helix_acp::DisplayLine::Separator);
                                 }
                             }
-                            client.account_info = account_info;
+                            state.account_info = account_info;
                         }
                         log::info!("ACP: agent '{name}' ready (session={sid})");
                         editor.set_status(format!("ACP: agent '{name}' ready"));
@@ -7634,7 +7636,9 @@ fn session_picker(cx: &mut Context) {
                             Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
                                 if let Some(client) = editor.acp.get_mut(agent_id) {
                                     client.session_id = Some(sid.clone());
-                                    client.config_options = config_options;
+                                }
+                                if let Some(state) = editor.acp.state_mut(agent_id) {
+                                    state.config_options = config_options;
                                 }
                                 log::info!("ACP: agent ready (session={sid})");
                             })))
@@ -7680,7 +7684,9 @@ fn session_picker(cx: &mut Context) {
                             Ok(job::Callback::Editor(Box::new(move |editor: &mut helix_view::Editor| {
                                 if let Some(client) = editor.acp.get_mut(agent_id) {
                                     client.session_id = Some(session_id.clone());
-                                    client.config_options = config_options;
+                                }
+                                if let Some(state) = editor.acp.state_mut(agent_id) {
+                                    state.config_options = config_options;
                                 }
                                 log::info!("ACP: session loaded ({session_id})");
                             })))
