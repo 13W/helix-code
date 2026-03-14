@@ -63,6 +63,8 @@ pub enum AcpEvent {
     TurnTokens {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
     },
     /// Updated config options returned by `session/set_config_option`.
     ConfigOptionsUpdate(Vec<sdk::SessionConfigOption>),
@@ -263,12 +265,14 @@ impl Client {
                                             },
                                         ));
                                     }
-                                    if let Some((input, output)) = try_parse_turn_tokens(bytes) {
+                                    if let Some((input, output, cache_read, cache_write)) = try_parse_turn_tokens(bytes) {
                                         let _ = event_tx_tee.send((
                                             agent_id,
                                             AcpEvent::TurnTokens {
                                                 input_tokens: input,
                                                 output_tokens: output,
+                                                cache_read_tokens: cache_read,
+                                                cache_write_tokens: cache_write,
                                             },
                                         ));
                                     }
