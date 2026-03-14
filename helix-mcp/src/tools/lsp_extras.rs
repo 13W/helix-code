@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::{editor_tx, McpCommand};
-use super::serde_lenient;
+use super::{editor_reply, serde_lenient};
 
 // ---------------------------------------------------------------------------
 // get_diagnostics
@@ -37,7 +37,7 @@ pub async fn handle_get_diagnostics(
     let path = params.path.map(PathBuf::from);
     tx.send(McpCommand::GetDiagnostics { path, reply: reply_tx }).await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let items = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))?;
+    let items = editor_reply(reply_rx).await?;
 
     let json_items: Vec<DiagnosticItemJson> = items
         .into_iter()
@@ -78,7 +78,7 @@ pub async fn handle_hover(params: HoverParams) -> anyhow::Result<CallToolResult>
     tx.send(McpCommand::Hover { path, line: params.line, col: params.col, reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let result = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let result = editor_reply(reply_rx).await??;
 
     let json = serde_json::to_string_pretty(&result)?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -113,7 +113,7 @@ pub async fn handle_code_actions(params: CodeActionsParams) -> anyhow::Result<Ca
     tx.send(McpCommand::CodeActions { path, line: params.line, col: params.col, reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let actions = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let actions = editor_reply(reply_rx).await??;
 
     let json_items: Vec<CodeActionItemJson> = actions
         .into_iter()
@@ -159,7 +159,7 @@ pub async fn handle_inlay_hints(params: InlayHintsParams) -> anyhow::Result<Call
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let hints = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let hints = editor_reply(reply_rx).await??;
 
     let json_items: Vec<InlayHintItemJson> = hints
         .into_iter()
@@ -205,7 +205,7 @@ pub async fn handle_completions(params: CompletionsParams) -> anyhow::Result<Cal
     tx.send(McpCommand::Completions { path, line: params.line, col: params.col, reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let items = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let items = editor_reply(reply_rx).await??;
 
     let json_items: Vec<CompletionItemJson> = items
         .into_iter()
@@ -274,7 +274,7 @@ pub async fn handle_signature_help(
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let result = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let result = editor_reply(reply_rx).await??;
 
     match result {
         None => Ok(CallToolResult::success(vec![Content::text("null")])),
