@@ -3784,7 +3784,8 @@ impl Application {
                 };
 
                 match notif.update {
-                    SessionUpdate::AgentMessageChunk(chunk) => {
+                    SessionUpdate::AgentMessageChunk(chunk)
+                    | SessionUpdate::UserMessageChunk(chunk) => {
                         if let ContentBlock::Text(tc) = chunk.content {
                             if !tc.text.is_empty() {
                                 match client.display.last_mut() {
@@ -3894,6 +3895,25 @@ impl Application {
                                     &mut client.display[pos]
                                 {
                                     *output = new_output.clone();
+                                }
+                            }
+                        }
+                        // Step A2: update name/input on in-flight ToolCall when update provides them.
+                        if let Some(pos) = client.display.iter_mut().position(|l| {
+                            matches!(l, DisplayLine::ToolCall { id, .. } if *id == id_s)
+                        }) {
+                            if let DisplayLine::ToolCall { name, input, .. } =
+                                &mut client.display[pos]
+                            {
+                                if let Some(new_title) = &update.fields.title {
+                                    *name = new_title.clone();
+                                }
+                                let new_input = format_tool_input(
+                                    update.fields.raw_input.as_ref(),
+                                    update.fields.locations.as_deref().unwrap_or(&[]),
+                                );
+                                if !new_input.is_empty() {
+                                    *input = new_input;
                                 }
                             }
                         }
