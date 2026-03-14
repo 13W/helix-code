@@ -3974,52 +3974,25 @@ impl Application {
                 .collect();
 
 for (agent_id, reply, allow_always_id) in pending {
-                if let Some((client, state)) = self.editor.acp.client_and_state_mut(agent_id) {
-                    state.is_prompting = true;
-                    let handle = client.handle();
-                    let session_id = client.session_id.clone();
-                    self.jobs.callback(async move {
-                        use crate::job::Callback;
-                        let sid = match session_id {
-                            Some(s) => s,
-                            None => {
-                                return Ok(Callback::Editor(Box::new(move |editor| {
-                                    if let Some(s) = editor.acp.state_mut(agent_id) {
-                                        s.is_prompting = false;
-                                    }
-                                    editor.set_error("no active session");
-                                })));
-                            }
-                        };
-                        // 1. Clear context on the existing session.
-                        let clear_result = handle
-                            .session_prompt(
-                                sid.clone(),
-                                vec![helix_acp::ContentBlock::text("/clear")],
-                            )
-                            .await;
-                        // 2. Send the permission response.
-                        let _ = reply
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .map(|tx: tokio::sync::oneshot::Sender<RequestPermissionResponse>| {
-                                tx.send(RequestPermissionResponse::new(
-                                    RequestPermissionOutcome::Selected(
-                                        SelectedPermissionOutcome::new(allow_always_id),
-                                    ),
-                                ))
-                            });
-                        Ok(Callback::Editor(Box::new(move |editor| {
-                            if let Some(s) = editor.acp.state_mut(agent_id) {
-                                s.is_prompting = false;
-                            }
-                            if let Err(e) = clear_result {
-                                editor.set_error(format!("clear failed: {e}"));
-                            }
-                        })))
-                    });
+                // Clear local display only (no RPC to agent — the ACP protocol
+                // has no session/clear method, and sending "/clear" as a prompt
+                // triggers "Unknown skill" in the agent SDK).
+                if let Some(state) = self.editor.acp.state_mut(agent_id) {
+                    state.display.clear();
+                    state.pending_edits.clear();
                 }
+                // Send the permission response immediately.
+                let _ = reply
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(|tx: tokio::sync::oneshot::Sender<RequestPermissionResponse>| {
+                        tx.send(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Selected(
+                                SelectedPermissionOutcome::new(allow_always_id),
+                            ),
+                        ))
+                    });
             }
         }
         if should_redraw && !self.editor.should_close() {
