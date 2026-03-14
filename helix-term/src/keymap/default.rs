@@ -290,6 +290,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "/" => global_search,
             "k" => hover,
             "K" => show_diff_base,
+            "V" => show_diff_view,
             "r" => rename_symbol,
             "h" => select_references_to_symbol_under_cursor,
             "c" => toggle_comments,
