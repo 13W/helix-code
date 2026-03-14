@@ -78,9 +78,13 @@ pub(crate) fn try_parse_usage_update(line: &[u8]) -> Option<(u64, u64, f64, Stri
     }
     let used = update.get("used")?.as_u64()?;
     let size = update.get("size")?.as_u64()?;
-    let cost = update.get("cost")?;
-    let amount = cost.get("amount")?.as_f64()?;
-    let currency = cost.get("currency")?.as_str()?.to_string();
+    let (amount, currency) = match update.get("cost") {
+        Some(cost) => (
+            cost.get("amount").and_then(|a| a.as_f64()).unwrap_or(0.0),
+            cost.get("currency").and_then(|c| c.as_str()).unwrap_or("USD").to_string(),
+        ),
+        None => (0.0, String::new()),
+    };
     Some((used, size, amount, currency))
 }
 
@@ -229,7 +233,7 @@ pub(crate) async fn rpc_actor(
                 }
 
                 AgentRpcCall::SetConfigOption { session_id, option_id, value, reply } => {
-                    let req = sdk::SetSessionConfigOptionRequest::new(session_id, option_id, value);
+                    let req = sdk::SetSessionConfigOptionRequest::new(session_id, option_id, value.as_str());
                     let result = conn.set_session_config_option(req).await;
                     if let Ok(ref resp) = result {
                         let _ = event_tx.send((agent_id, AcpEvent::ConfigOptionsUpdate(

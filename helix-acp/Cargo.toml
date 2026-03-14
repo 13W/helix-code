@@ -12,7 +12,7 @@ homepage.workspace = true
 
 [dependencies]
 helix-acp-types = { path = "../helix-acp-types" }
-agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"] }
+agent-client-protocol = { version = "0.10.2", features = ["unstable"] }
 anyhow = "1.0"
 async-trait = "0.1"
 futures-util.workspace = true
