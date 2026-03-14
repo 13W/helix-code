@@ -964,50 +964,18 @@ impl Component for AgentPanel {
                     })));
                 }
 
-                // Handle /clear: reset local display and scroll, then send to agent.
+                // Handle /clear: local-only display reset (no RPC to agent).
+                // The agent retains its session and conversation history server-side.
+                // This matches Claude Code CLI behavior where /clear is purely client-side.
                 if text.trim() == "/clear" {
-                    let agent_id = self.agent_id;
-
-                    // Send /clear as a prompt so the agent clears its context too.
-                    let rpc = cx.editor.acp.get(agent_id).and_then(|c| {
-                        c.session_id.clone().map(|sid| (sid, c.handle()))
-                    });
-                    if let Some((session_id, handle)) = rpc {
-                        if let Some(st) = cx.editor.acp.state_mut(agent_id) {
-                            st.is_prompting = true;
-                        }
-                        let prompt = vec![helix_acp::ContentBlock::Text { text }];
-                        cx.jobs.callback(async move {
-                            use crate::job::Callback;
-
-                            if let Err(e) = handle
-                                .session_prompt(session_id.clone(), prompt)
-                                .await
-                            {
-                                return Ok(Callback::Editor(Box::new(
-                                    move |editor: &mut helix_view::Editor| {
-                                        if let Some(s) = editor.acp.state_mut(agent_id) {
-                                            s.is_prompting = false;
-                                        }
-                                        editor.set_error(format!("Agent error: {e}"));
-                                    },
-                                )));
-                            }
-                            Ok(Callback::Editor(Box::new(
-                                move |editor: &mut helix_view::Editor| {
-                                    if let Some(s) = editor.acp.state_mut(agent_id) {
-                                        s.is_prompting = false;
-                                        s.display.clear();
-                                    }
-                                    editor.set_status("Context cleared");
-                                },
-                            )))
-                        });
-                        cx.editor.set_status("Clearing context\u{2026}");
+                    if let Some(st) = cx.editor.acp.state_mut(self.agent_id) {
+                        st.display.clear();
+                        st.pending_edits.clear();
                     }
                     self.scroll = 0;
                     self.pinned = true;
                     self.line_heights.clear();
+                    cx.editor.set_status("Context cleared");
                     return EventResult::Consumed(None);
                 }
 
