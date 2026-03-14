@@ -962,13 +962,6 @@ impl Component for AgentPanel {
                 // Handle /clear: reset local display and scroll, then send to agent.
                 if text.trim() == "/clear" {
                     let agent_id = self.agent_id;
-                    if let Some(client) = cx.editor.acp.get_mut(agent_id) {
-                        client.display.clear();
-                        client.session_usage = helix_acp::SessionUsage::default();
-                    }
-                    self.scroll = 0;
-                    self.pinned = true;
-                    self.line_heights.clear();
 
                     // Send /clear as a prompt so the agent clears its context too.
                     let state = cx.editor.acp.get(agent_id).and_then(|c| {
@@ -999,8 +992,6 @@ impl Component for AgentPanel {
                                 move |editor: &mut helix_view::Editor| {
                                     if let Some(c) = editor.acp.get_mut(agent_id) {
                                         c.is_prompting = false;
-                                        // Clear display again in case the agent echoed
-                                        // back messages during the /clear handling.
                                         c.display.clear();
                                     }
                                     editor.set_status("Context cleared");
@@ -1009,6 +1000,9 @@ impl Component for AgentPanel {
                         });
                         cx.editor.set_status("Clearing context\u{2026}");
                     }
+                    self.scroll = 0;
+                    self.pinned = true;
+                    self.line_heights.clear();
                     return EventResult::Consumed(None);
                 }
 
@@ -1028,6 +1022,7 @@ impl Component for AgentPanel {
                         client.display.push(helix_acp::DisplayLine::UserMessage(text.clone()));
                         client.is_prompting = true;
                     }
+                    helix_event::request_redraw();
                     let prompt = vec![helix_acp::ContentBlock::Text { text }];
                     cx.jobs.callback(async move {
                         use crate::job::Callback;
