@@ -37,7 +37,7 @@ pub async fn handle_write_file(params: WriteFileParams) -> Result<CallToolResult
     Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
 }
 
-// ── edit_file (apply_edits) ────────────────────────────────────────────────────
+// ── patch_file (apply_edits) ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TextEditParams {
@@ -53,7 +53,7 @@ pub struct TextEditParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct EditFileParams {
+pub struct PatchFileParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// List of edits to apply
@@ -61,7 +61,7 @@ pub struct EditFileParams {
     pub edits: Vec<TextEditParams>,
 }
 
-pub async fn handle_edit_file(params: EditFileParams) -> Result<CallToolResult> {
+pub async fn handle_patch_file(params: PatchFileParams) -> Result<CallToolResult> {
     if params.edits.is_empty() {
         anyhow::bail!("edits list is empty");
     }
@@ -125,10 +125,10 @@ pub async fn handle_insert_text(params: InsertTextParams) -> Result<CallToolResu
     Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
 }
 
-// ── patch_file ────────────────────────────────────────────────────────────────
+// ── edit_file ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PatchFileParams {
+pub struct EditFileParams {
     /// File path (absolute or relative to CWD)
     pub path: String,
     /// Exact string to find and replace. Omit to do a pure line-range replacement.
@@ -147,11 +147,11 @@ pub struct PatchFileParams {
 }
 
 
-pub async fn handle_patch_file(params: PatchFileParams) -> Result<CallToolResult> {
+pub async fn handle_edit_file(params: EditFileParams) -> Result<CallToolResult> {
     let tx = editor_tx().ok_or_else(|| anyhow!("no editor connection"))?;
     let path = resolve_path(&params.path);
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(McpCommand::PatchFile {
+    tx.send(McpCommand::EditFile {
         path,
         old_string: params.old_string,
         new_string: params.new_string,
