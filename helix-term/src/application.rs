@@ -2025,11 +2025,119 @@ impl Application {
 
                 let future = match doc_sym_data2 {
                     Ok(f) => f,
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
+                    Err(_) => {
+                        // No LSP — fall back to scanning the already-loaded buffer text.
+                        // The file was opened with Action::Load above, so doc is in the editor.
+                        let text = match self.editor.document_by_path(&path) {
+                            Some(doc) => doc.text().clone(),
+                            None => {
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "could not read {}", path.display()
+                                )));
+                                return;
+                            }
+                        };
+
+                        // Parse name_path.
+                        let parts: Vec<&str> = name_path.splitn(2, '/').collect();
+                        let parent_name = parts[0];
+                        let child_name = parts.get(1).copied();
+                        let target = child_name.unwrap_or(parent_name);
+
+                        // Returns true if `line` contains `name` as a whole word.
+                        fn has_word(line: &str, name: &str) -> bool {
+                            let mut s = line;
+                            while let Some(pos) = s.find(name) {
+                                let before_ok = pos == 0
+                                    || !s.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                                        && s.as_bytes()[pos - 1] != b'_';
+                                let end = pos + name.len();
+                                let after_ok = end >= s.len()
+                                    || !s.as_bytes()[end].is_ascii_alphanumeric()
+                                        && s.as_bytes()[end] != b'_';
+                                if before_ok && after_ok {
+                                    return true;
+                                }
+                                s = &s[pos + 1..];
+                            }
+                            false
+                        }
+
+                        // Find the end line by tracking brace depth from `start`.
+                        // Returns `start` for single-line / brace-less definitions.
+                        fn find_extent(text: &helix_core::Rope, start: usize) -> usize {
+                            let n = text.len_lines();
+                            let mut depth: i32 = 0;
+                            let mut seen_open = false;
+                            for li in start..n {
+                                let line = text.line(li).to_string();
+                                for ch in line.chars() {
+                                    match ch {
+                                        '{' => { depth += 1; seen_open = true; }
+                                        '}' => { depth -= 1; }
+                                        _ => {}
+                                    }
+                                }
+                                if seen_open && depth <= 0 {
+                                    return li;
+                                }
+                            }
+                            start
+                        }
+
+                        let n = text.len_lines();
+                        let mut scan_result: Option<(usize, usize)> = None;
+
+                        if child_name.is_some() {
+                            'outer: for li in 0..n {
+                                if has_word(&text.line(li).to_string(), parent_name) {
+                                    let parent_end = find_extent(&text, li);
+                                    for ci in (li + 1)..=parent_end.min(n.saturating_sub(1)) {
+                                        if has_word(&text.line(ci).to_string(), target) {
+                                            scan_result = Some((ci, find_extent(&text, ci)));
+                                            break 'outer;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        } else {
+                            for li in 0..n {
+                                if has_word(&text.line(li).to_string(), target) {
+                                    scan_result = Some((li, find_extent(&text, li)));
+                                    break;
+                                }
+                            }
+                        }
+
+                        let (start_line, end_line) = match scan_result {
+                            Some(r) => r,
+                            None => {
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "symbol '{}' not found in {} (no LSP, text scan used)",
+                                    name_path,
+                                    path.display()
+                                )));
+                                return;
+                            }
+                        };
+
+                        let sym_range = helix_mcp::LineRange { start_line, end_line };
+                        let start_char = text.line_to_char(start_line.min(n));
+                        let end_char   = text.line_to_char((end_line + 1).min(n));
+                        let body = text.slice(start_char..end_char).to_string();
+
+                        let _ = reply.send(Ok(helix_mcp::SymbolMatch {
+                            name: target.to_string(),
+                            kind: "unknown".to_string(),
+                            path,
+                            range: sym_range,
+                            body: Some(body),
+                        }));
                         return;
                     }
                 };
+
 
                 let response = match block_on(future) {
                     Ok(Some(r)) => r,
