@@ -111,11 +111,11 @@ impl HelixMcpServer {
     }
 
     #[rmcp::tool(description = "Apply multiple line-based text edits to a file atomically. Shows a diff and requires user approval.")]
-    async fn edit_file(
+    async fn patch_file(
         &self,
-        params: Parameters<tools::write::EditFileParams>,
+        params: Parameters<tools::write::PatchFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::write::handle_edit_file(params.0).await
+        tools::write::handle_patch_file(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 
@@ -129,11 +129,11 @@ impl HelixMcpServer {
     }
 
     #[rmcp::tool(description = "Find-and-replace an exact string in a file, replace a line range, or both. Shows diff and requires user approval. Params: old_string (exact text to find), new_string (replacement, required), start_line/end_line (1-indexed scope or range).")]
-    async fn patch_file(
+    async fn edit_file(
         &self,
-        params: Parameters<tools::write::PatchFileParams>,
+        params: Parameters<tools::write::EditFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::write::handle_patch_file(params.0).await
+        tools::write::handle_edit_file(params.0).await
             .map_err(tools::fs::to_mcp_err)
     }
 
@@ -484,10 +484,10 @@ impl ServerHandler for HelixMcpServer {
                  This server has EXCLUSIVE ownership of all file read, write, and edit operations. \
                  NEVER use built-in Read, Write, Edit, Glob, or Grep tools — \
                  always use the MCP tools provided by this server instead: \
-                 read_file, read_range, write_file, edit_file, insert_text, \
+                 read_file, read_range, write_file, edit_file, patch_file, insert_text, \
                  find_files, search, list_dir. \
                  read_file reads from the live editor buffer and sees unsaved changes; \
-                 write_file and edit_file show a diff and require user approval before applying."
+                 write_file, edit_file and patch_file show a diff and require user approval before applying."
                     .into(),
             ),
         }

@@ -577,7 +577,7 @@ pub enum McpCommand {
         reply: oneshot::Sender<Vec<JumpEntry>>,
     },
     /// Hybrid find-replace / line-range edit.
-    PatchFile {
+    EditFile {
         path: PathBuf,
         old_string: Option<String>,
         new_string: String,
