@@ -1214,7 +1214,7 @@ impl Application {
             }
 
 
-            McpCommand::PatchFile {
+            McpCommand::EditFile {
                 path,
                 old_string,
                 new_string,
@@ -3872,7 +3872,6 @@ impl Application {
                         }
                         client.session_usage.context_used = uu.used;
                         client.session_usage.context_size = uu.size;
-                        client.session_usage.total_used += uu.used;
                     }
                     _ => {}
                 }
@@ -4108,15 +4107,16 @@ impl Application {
                     client.session_usage.currency = currency;
                     client.session_usage.context_used = used;
                     client.session_usage.context_size = size;
-                    client.session_usage.total_used += used;
                 }
                 helix_event::request_redraw();
             }
 
-            AcpEvent::TurnTokens { input_tokens, output_tokens } => {
+            AcpEvent::TurnTokens { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } => {
                 if let Some(client) = self.editor.acp.get_mut(agent_id) {
                     client.session_usage.input_tokens += input_tokens;
                     client.session_usage.output_tokens += output_tokens;
+                    client.session_usage.cache_read_tokens += cache_read_tokens;
+                    client.session_usage.cache_write_tokens += cache_write_tokens;
                 }
                 helix_event::request_redraw();
             }
