@@ -348,11 +348,11 @@ impl Component for AgentPanel {
             title.push_str(&format!(" [{short}]"));
         }
 
-        // Combined usage: [{pct}% {ctx_used}/{ctx_size}/{total_used} {cost}{currency}]
+        // Combined usage: [{pct}% {ctx_used}/{ctx_size} | {in}/{out} ~{cache} | ${cost}]
         {
             let su = &client.session_usage;
             let has_ctx = su.context_size > 0;
-            let has_tokens = su.total_used > 0;
+            let has_tokens = su.input_tokens > 0 || su.output_tokens > 0;
             let has_cost = su.cost_amount > 0.0 || !su.currency.is_empty();
 
             if has_ctx || has_tokens || has_cost {
@@ -360,26 +360,31 @@ impl Component for AgentPanel {
 
                 if has_ctx {
                     let pct = (su.context_used as f64 / su.context_size as f64 * 100.0) as u64;
-                    if has_tokens {
+                    parts.push(format!("{}% {}/{}", pct, fmt_tokens(su.context_used), fmt_tokens(su.context_size)));
+                }
+
+                if has_tokens {
+                    if su.cache_read_tokens > 0 {
                         parts.push(format!(
-                            "{}% {}/{}/{}",
-                            pct,
-                            fmt_tokens(su.context_used),
-                            fmt_tokens(su.context_size),
-                            fmt_tokens(su.total_used),
+                            "{}/{} ~{}",
+                            fmt_tokens(su.input_tokens),
+                            fmt_tokens(su.output_tokens),
+                            fmt_tokens(su.cache_read_tokens),
                         ));
                     } else {
-                        parts.push(format!("{}% {}/{}", pct, fmt_tokens(su.context_used), fmt_tokens(su.context_size)));
+                        parts.push(format!("{}/{}", fmt_tokens(su.input_tokens), fmt_tokens(su.output_tokens)));
                     }
-                } else if has_tokens {
-                    parts.push(fmt_tokens(su.total_used));
                 }
 
                 if has_cost {
-                    parts.push(format!("{:.2}{}", su.cost_amount, su.currency));
+                    let cost_str = match su.currency.as_str() {
+                        "" | "USD" => format!("${:.2}", su.cost_amount),
+                        cur => format!("{:.2} {}", su.cost_amount, cur),
+                    };
+                    parts.push(cost_str);
                 }
 
-                title.push_str(&format!(" [{}]", parts.join(" ")));
+                title.push_str(&format!(" [{}]", parts.join(" | ")));
             }
         }
         title.push(' ');

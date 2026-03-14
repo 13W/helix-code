@@ -277,12 +277,14 @@ pub enum DisplayLine {
 pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Tokens served from the prompt cache (cachedReadTokens).
+    pub cache_read_tokens: u64,
+    /// Tokens written to the prompt cache (cachedWriteTokens).
+    pub cache_write_tokens: u64,
     pub cost_amount: f64,
     pub currency: String,
     /// Context window tokens used (from UsageUpdate).
     pub context_used: u64,
     /// Context window total size (from UsageUpdate).
     pub context_size: u64,
-    /// Cumulative sum of `used` from all UsageUpdate events.
-    pub total_used: u64,
 }
