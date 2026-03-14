@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
-use super::serde_lenient;
+use super::{editor_reply, serde_lenient};
 
 // ── read_file ────────────────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ pub async fn handle_read_range(params: ReadRangeParams) -> Result<CallToolResult
             reply: reply_tx,
         })
         .await?;
-        let raw = reply_rx.await??;
+        let raw = editor_reply(reply_rx).await??;
         let numbered = add_line_numbers(&raw, params.start_line);
         let json = serde_json::json!({
             "content": [{ "type": "text", "text": numbered }],
@@ -141,7 +141,7 @@ pub async fn handle_get_open_buffers() -> Result<CallToolResult> {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(McpCommand::GetOpenBuffers { reply: reply_tx }).await?;
-    let buffers = reply_rx.await?;
+    let buffers = editor_reply(reply_rx).await?;
 
     let json_buffers: Vec<serde_json::Value> = buffers
         .into_iter()

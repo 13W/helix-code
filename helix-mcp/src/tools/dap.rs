@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{editor_tx, McpCommand};
-use super::serde_lenient;
+use super::{editor_reply, serde_lenient};
 
 // ---------------------------------------------------------------------------
 // get_breakpoints
@@ -41,7 +41,7 @@ pub async fn handle_get_breakpoints(
     tx.send(McpCommand::GetBreakpoints { path, reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let bps = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))?;
+    let bps = editor_reply(reply_rx).await?;
     let json_items: Vec<BreakpointJson> = bps
         .into_iter()
         .map(|b| BreakpointJson {
@@ -85,9 +85,7 @@ pub async fn handle_set_breakpoint(params: SetBreakpointParams) -> anyhow::Resul
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let bp = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let bp = editor_reply(reply_rx).await??;
     let json = serde_json::to_string_pretty(&BreakpointJson {
         path: bp.path.to_string_lossy().into_owned(),
         line: bp.line,
@@ -125,9 +123,7 @@ pub async fn handle_remove_breakpoint(
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text(
         "{\"ok\":true}",
     )]))
@@ -151,7 +147,7 @@ pub async fn handle_get_dap_status() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::GetDapStatus { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let s = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))?;
+    let s = editor_reply(reply_rx).await?;
     let json = serde_json::to_string_pretty(&DapStatusJson {
         active: s.active,
         paused: s.paused,
@@ -193,9 +189,7 @@ pub async fn handle_get_stack_trace(
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let frames = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let frames = editor_reply(reply_rx).await??;
     let json_items: Vec<StackFrameJson> = frames
         .into_iter()
         .map(|f| StackFrameJson {
@@ -238,9 +232,7 @@ pub async fn handle_get_scopes(params: GetScopesParams) -> anyhow::Result<CallTo
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let scopes = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let scopes = editor_reply(reply_rx).await??;
     let json_items: Vec<ScopeJson> = scopes
         .into_iter()
         .map(|s| ScopeJson {
@@ -318,9 +310,7 @@ pub async fn handle_get_variables(params: GetVariablesParams) -> anyhow::Result<
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let vars = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let vars = editor_reply(reply_rx).await??;
     let json_items: Vec<VariableJson> = vars
         .into_iter()
         .map(|v| VariableJson {
@@ -345,9 +335,7 @@ pub async fn handle_dap_continue() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapContinue { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -361,9 +349,7 @@ pub async fn handle_dap_pause() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapPause { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -377,9 +363,7 @@ pub async fn handle_dap_step_over() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapStepOver { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -393,9 +377,7 @@ pub async fn handle_dap_step_in() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapStepIn { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -409,9 +391,7 @@ pub async fn handle_dap_step_out() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapStepOut { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -441,9 +421,7 @@ pub async fn handle_dap_list_templates() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapListTemplates { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let templates = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let templates = editor_reply(reply_rx).await??;
     let json_items: Vec<DapTemplateInfoJson> = templates
         .into_iter()
         .map(|t| DapTemplateInfoJson {
@@ -484,9 +462,7 @@ pub async fn handle_dap_launch(params: DapLaunchParams) -> anyhow::Result<CallTo
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }
 
@@ -500,8 +476,6 @@ pub async fn handle_dap_terminate() -> anyhow::Result<CallToolResult> {
     tx.send(McpCommand::DapTerminate { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text("{\"ok\":true}")]))
 }

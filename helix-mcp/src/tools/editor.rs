@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::{editor_tx, McpCommand};
+use super::editor_reply;
 
 // ---------------------------------------------------------------------------
 // get_cursor
@@ -24,7 +25,7 @@ pub async fn handle_get_cursor() -> anyhow::Result<CallToolResult> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(McpCommand::GetCursor { reply: reply_tx }).await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let state = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))?;
+    let state = editor_reply(reply_rx).await?;
 
     let mode = match state.mode {
         crate::EditorMode::Normal => "normal",
@@ -69,7 +70,7 @@ pub async fn handle_get_selections(
     let path = PathBuf::from(&params.path);
     tx.send(McpCommand::GetSelections { path, reply: reply_tx }).await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let ranges = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let ranges = editor_reply(reply_rx).await??;
 
     let json_ranges: Vec<SelectionRangeJson> = ranges
         .into_iter()
@@ -112,7 +113,7 @@ pub async fn handle_get_viewport(
     let path = PathBuf::from(&params.path);
     tx.send(McpCommand::GetViewport { path, reply: reply_tx }).await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let viewport = reply_rx.await.map_err(|_| anyhow::anyhow!("editor did not reply"))??;
+    let viewport = editor_reply(reply_rx).await??;
 
     let json = serde_json::to_string_pretty(&ViewportInfoJson {
         first_visible_line: viewport.first_visible_line,
