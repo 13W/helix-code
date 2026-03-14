@@ -1,3 +1,4 @@
+use helix_acp::AgentId;
 use helix_core::{ChangeSet, Rope};
 use helix_event::events;
 use helix_lsp::LanguageServerId;
@@ -40,5 +41,9 @@ events! {
         editor: &'a mut Editor,
         old: &'a Config,
         new: &'a Config
+    }
+
+    AcpStateChanged {
+        agent_id: AgentId
     }
 }

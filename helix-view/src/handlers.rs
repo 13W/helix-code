@@ -5,6 +5,7 @@ use tokio::sync::mpsc::Sender;
 use crate::handlers::lsp::SignatureHelpInvoked;
 use crate::{DocumentId, Editor, ViewId};
 
+pub mod acp;
 pub mod completion;
 pub mod dap;
 pub mod diagnostics;
@@ -58,6 +59,7 @@ impl Handlers {
 }
 
 pub fn register_hooks(handlers: &Handlers) {
+    acp::register_hooks();
     lsp::register_hooks(handlers);
     word_index::register_hooks(handlers);
 }
