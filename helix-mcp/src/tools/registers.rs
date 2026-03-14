@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::{editor_tx, McpCommand};
+use super::editor_reply;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadRegisterParams {
@@ -52,9 +53,7 @@ pub async fn handle_read_register(params: ReadRegisterParams) -> Result<CallTool
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let values = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
+    let values = editor_reply(reply_rx).await??;
     let out = RegisterReadOut {
         name: params.name.to_string(),
         values,
@@ -73,9 +72,7 @@ pub async fn handle_write_register(params: WriteRegisterParams) -> Result<CallTo
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
+    editor_reply(reply_rx).await??;
     let json = serde_json::to_string_pretty(&WriteOkOut { ok: true })?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
 }
@@ -86,9 +83,7 @@ pub async fn handle_get_jumplist() -> Result<CallToolResult> {
     tx.send(McpCommand::GetJumplist { reply: reply_tx })
         .await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let entries = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))?;
+    let entries = editor_reply(reply_rx).await?;
     let out = JumplistOut {
         jumps: entries
             .into_iter()

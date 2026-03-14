@@ -4,6 +4,8 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
+
+use super::editor_reply;
 use tokio::sync::oneshot;
 
 use super::serde_lenient;
@@ -28,7 +30,7 @@ pub async fn handle_write_file(params: WriteFileParams) -> Result<CallToolResult
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,
@@ -83,7 +85,7 @@ pub async fn handle_patch_file(params: PatchFileParams) -> Result<CallToolResult
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,
@@ -116,7 +118,7 @@ pub async fn handle_insert_text(params: InsertTextParams) -> Result<CallToolResu
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,
@@ -161,7 +163,7 @@ pub async fn handle_edit_file(params: EditFileParams) -> Result<CallToolResult> 
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,
@@ -198,7 +200,7 @@ pub async fn handle_rename_symbol(params: RenameSymbolParams) -> Result<CallTool
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,
@@ -237,7 +239,7 @@ pub async fn handle_replace_symbol(params: ReplaceSymbolParams) -> Result<CallTo
         reply: reply_tx,
     })
     .await?;
-    let result = reply_rx.await??;
+    let result = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "path": result.path.to_string_lossy(),
         "lines_changed": result.lines_changed,

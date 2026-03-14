@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::{editor_tx, fetch_diff_base_content, truncate_to_char_boundary, HunkKind, McpCommand, MAX_INLINE_BYTES};
+use super::editor_reply;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiffHunksParams {
@@ -43,9 +44,7 @@ pub async fn handle_diff_hunks(params: DiffHunksParams) -> Result<CallToolResult
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let result = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
+    let result = editor_reply(reply_rx).await??;
 
     let out = DiffHunksOut {
         path: result.path,

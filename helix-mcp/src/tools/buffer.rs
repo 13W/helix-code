@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::{editor_tx, McpCommand};
+use super::editor_reply;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadFileParams {
@@ -27,9 +28,7 @@ pub async fn handle_load_file(params: LoadFileParams) -> Result<CallToolResult> 
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let msg = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
+    let msg = editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text(msg)]))
 }
 
@@ -42,8 +41,6 @@ pub async fn handle_unload_file(params: UnloadFileParams) -> Result<CallToolResu
     })
     .await
     .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let msg = reply_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("reply channel closed"))??;
+    let msg = editor_reply(reply_rx).await??;
     Ok(CallToolResult::success(vec![Content::text(msg)]))
 }
