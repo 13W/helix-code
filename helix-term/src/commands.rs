@@ -460,7 +460,8 @@ impl MappableCommand {
         goto_prev_change, "Goto previous change",
         goto_first_change, "Goto first change",
         goto_last_change, "Goto last change",
-        show_diff_base, "Show VCS diff base for hunk at cursor",
+        show_diff_base, "Show original hunk text at cursor (VCS diff base)",
+        show_diff_view, "Open side-by-side diff view of the entire file",
         goto_line_start, "Goto line start",
         goto_line_end, "Goto line end",
         goto_column, "Goto column",
@@ -4177,7 +4178,6 @@ fn show_diff_base(cx: &mut Context) {
 
     let diff = diff_handle.load();
     let base_text = diff.diff_base().to_string();
-    let doc_text = doc.text().to_string();
     let language = doc
         .language_config()
         .map(|l| l.language_id.clone())
@@ -4188,19 +4188,73 @@ fn show_diff_base(cx: &mut Context) {
         .primary()
         .cursor_line(doc.text().slice(..)) as u32;
 
-    let hunks: Vec<helix_vcs::Hunk> = if let Some(idx) = diff.hunk_at(cursor_line, true) {
-        vec![diff.nth_hunk(idx)]
+    // Extract only the original lines for the hunk at cursor.
+    let hunk_base_text = if let Some(idx) = diff.hunk_at(cursor_line, true) {
+        let hunk = diff.nth_hunk(idx);
+        let before_start = hunk.before.start as usize;
+        let before_end = hunk.before.end as usize;
+        base_text
+            .lines()
+            .skip(before_start)
+            .take(before_end - before_start)
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
-        Vec::new()
+        // No hunk at cursor – show a few lines of context from base around cursor.
+        let ctx_start = (cursor_line as usize).saturating_sub(3);
+        let ctx_end = (cursor_line as usize + 4).min(base_text.lines().count());
+        base_text
+            .lines()
+            .skip(ctx_start)
+            .take(ctx_end - ctx_start)
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     drop(diff); // release RwLock before callback
 
     cx.callback.push(Box::new(move |compositor, _cx| {
-        use crate::ui::{diff_base::DiffBaseView, Popup};
-        let view = DiffBaseView::new(base_text, doc_text, language, hunks);
-        let popup = Popup::new(DiffBaseView::ID, view).auto_close(true);
-        compositor.replace_or_push(DiffBaseView::ID, popup);
+        use crate::ui::{diff_base::DiffHunkView, Popup};
+        let view = DiffHunkView::new(language, hunk_base_text);
+        let popup = Popup::new(DiffHunkView::ID, view).auto_close(true);
+        compositor.replace_or_push(DiffHunkView::ID, popup);
+    }));
+}
+
+fn show_diff_view(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let diff_handle = match doc.diff_handle() {
+        Some(h) => h,
+        None => {
+            cx.editor.set_error("No diff available for this buffer");
+            return;
+        }
+    };
+
+    let diff = diff_handle.load();
+    let base_text = diff.diff_base().to_string();
+    let doc_text = doc.text().to_string();
+    let language = doc
+        .language_config()
+        .map(|l| l.language_id.clone())
+        .unwrap_or_default();
+
+    let cursor_line = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..)) as usize;
+
+    // Collect all hunks in the file for the full-file diff view.
+    let hunk_count = diff.len();
+    let all_hunks: Vec<helix_vcs::Hunk> = (0..hunk_count).map(|i| diff.nth_hunk(i)).collect();
+
+    drop(diff); // release RwLock before callback
+
+    cx.callback.push(Box::new(move |compositor, _cx| {
+        use crate::ui::{diff_base::DiffBaseView, overlay::overlaid};
+        let view =
+            DiffBaseView::new_full_file(base_text, doc_text, language, all_hunks, cursor_line);
+        compositor.replace_or_push(DiffBaseView::ID, overlaid(view));
     }));
 }
 
