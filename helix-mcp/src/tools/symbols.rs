@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
-use super::serde_lenient;
+use super::{editor_reply, serde_lenient};
 
 // ── get_symbols_overview ──────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ pub async fn handle_get_symbols_overview(
         reply: reply_tx,
     })
     .await?;
-    let (symbols, source) = reply_rx.await??;
+    let (symbols, source) = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "symbols": symbols_to_json(&symbols),
         "source": source,
@@ -81,7 +81,7 @@ pub async fn handle_find_symbol(params: FindSymbolParams) -> Result<CallToolResu
         reply: reply_tx,
     })
     .await?;
-    let matches = reply_rx.await??;
+    let matches = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "symbols": matches.iter().map(|m| serde_json::json!({
             "name": m.name,
@@ -121,7 +121,7 @@ pub async fn handle_find_refs(params: FindRefsParams) -> Result<CallToolResult> 
         reply: reply_tx,
     })
     .await?;
-    let refs = reply_rx.await??;
+    let refs = editor_reply(reply_rx).await??;
     let count = refs.len();
     let json = serde_json::json!({
         "refs": refs.iter().map(|r| serde_json::json!({
@@ -157,7 +157,7 @@ pub async fn handle_read_symbol(params: ReadSymbolParams) -> Result<CallToolResu
         reply: reply_tx,
     })
     .await?;
-    let m = reply_rx.await??;
+    let m = editor_reply(reply_rx).await??;
     let json = serde_json::json!({
         "name": m.name,
         "kind": m.kind,

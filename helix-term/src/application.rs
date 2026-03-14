@@ -789,6 +789,49 @@ impl Application {
         }
     }
 
+    /// Ensure a file is open (via `Action::Load`, which does NOT switch focus)
+    /// and, if the file was just opened, wait for at least one language server
+    /// with `feature` to finish its `initialize` handshake.
+    ///
+    /// Returns `Ok(())` once the document is open and an LSP is ready, or after
+    /// a 15-second timeout (whichever comes first).  The caller should still
+    /// handle the "no LSP" case gracefully — the timeout may expire before any
+    /// server is ready.
+    async fn ensure_open_with_lsp(
+        &mut self,
+        path: &std::path::Path,
+        feature: helix_core::syntax::config::LanguageServerFeature,
+    ) -> anyhow::Result<()> {
+        let was_new = self.editor.document_by_path(path).is_none();
+        if was_new {
+            self.editor
+                .open(path, helix_view::editor::Action::Load)
+                .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))?;
+        }
+        // If file was just opened, LSP servers may still be initializing.
+        // Poll until at least one server with the requested feature is ready.
+        if was_new {
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                let ready = self
+                    .editor
+                    .document_by_path(path)
+                    .map(|doc| {
+                        doc.language_servers_with_feature(feature)
+                            .next()
+                            .is_some()
+                    })
+                    .unwrap_or(false);
+                if ready || tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_mcp_command(&mut self, cmd: helix_mcp::McpCommand) {
         use helix_mcp::{BufferInfo, McpCommand, WriteResult};
         match cmd {
@@ -1263,16 +1306,12 @@ impl Application {
                 use helix_lsp::block_on;
                 use std::sync::Mutex;
 
-                // Ensure the document is open so LSP can operate on it.
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::RenameSymbol)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 // Borrow doc + ls to extract all needed data, then release the borrow.
@@ -1417,16 +1456,12 @@ impl Application {
                 use helix_lsp::block_on;
                 use helix_mcp::TextEdit;
 
-                // Ensure document is open.
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::DocumentSymbols)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 // Find the symbol range via LSP document_symbols (same logic as ReadSymbol).
@@ -1555,16 +1590,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                // Ensure the document is open so LSP can operate on it.
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::DocumentSymbols)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 // Borrow doc + ls, extract future, release borrow.
@@ -1693,9 +1724,9 @@ impl Application {
 
                 // Open file if path given, so we can find its LSP.
                 if let Some(ref p) = path {
-                    if self.editor.document_by_path(p).is_none() {
-                        let _ = self.editor.open(p, helix_view::editor::Action::Load);
-                    }
+                    let _ = self
+                        .ensure_open_with_lsp(p, LanguageServerFeature::WorkspaceSymbols)
+                        .await;
                 }
 
                 // Find any document with WorkspaceSymbols LSP support.
@@ -1838,16 +1869,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                // Ensure the document is open.
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::GotoReference)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let refs_data: anyhow::Result<_> = (|| {
@@ -1935,16 +1962,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                // Ensure the document is open.
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::DocumentSymbols)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let doc_sym_data2: anyhow::Result<_> = (|| {
@@ -2427,15 +2450,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::Hover)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let hover_data: anyhow::Result<_> = (|| {
@@ -2515,15 +2535,12 @@ impl Application {
                 use helix_lsp::block_on;
                 use helix_lsp::lsp::{CodeActionContext, CodeActionTriggerKind};
 
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::CodeAction)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let ca_data: anyhow::Result<_> = (|| {
@@ -2613,15 +2630,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::InlayHints)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let ih_data: anyhow::Result<_> = (|| {
@@ -2728,15 +2742,12 @@ impl Application {
                 use helix_lsp::block_on;
                 use helix_lsp::lsp::{CompletionContext, CompletionTriggerKind};
 
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::Completion)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let comp_data: anyhow::Result<_> = (|| {
@@ -2860,15 +2871,12 @@ impl Application {
                 use helix_core::syntax::config::LanguageServerFeature;
                 use helix_lsp::block_on;
 
-                if self.editor.document_by_path(&path).is_none() {
-                    if let Err(e) = self
-                        .editor
-                        .open(&path, helix_view::editor::Action::Load)
-                        .map_err(|e| anyhow::anyhow!("could not open {}: {e}", path.display()))
-                    {
-                        let _ = reply.send(Err(e));
-                        return;
-                    }
+                if let Err(e) = self
+                    .ensure_open_with_lsp(&path, LanguageServerFeature::SignatureHelp)
+                    .await
+                {
+                    let _ = reply.send(Err(e));
+                    return;
                 }
 
                 let sig_data: anyhow::Result<_> = (|| {
@@ -3557,6 +3565,19 @@ impl Application {
             // --- VCS: Diff ---
 
             McpCommand::GetDiffHunks { path, reply } => {
+                // Auto-open the file if not already open so diff tracking works.
+                if self.editor.document_by_path(&path).is_none() {
+                    if let Err(e) = self
+                        .editor
+                        .open(&path, helix_view::editor::Action::Load)
+                        .map_err(|e| {
+                            anyhow::anyhow!("could not open {}: {e}", path.display())
+                        })
+                    {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                }
                 if let Some(doc) = self.editor.document_by_path(&path) {
                     if let Some(diff_handle) = doc.diff_handle() {
                         let diff = diff_handle.load();
@@ -3589,10 +3610,6 @@ impl Application {
                         hunks: vec![],
                         head_ref: None,
                     }));
-                } else {
-                    let _ = reply.send(Err(anyhow::anyhow!(
-                        "File not open in editor — open the file to enable diff tracking"
-                    )));
                 }
             }
 
