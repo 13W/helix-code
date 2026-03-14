@@ -84,13 +84,15 @@ pub(crate) fn try_parse_usage_update(line: &[u8]) -> Option<(u64, u64, f64, Stri
     Some((used, size, amount, currency))
 }
 
-pub(crate) fn try_parse_turn_tokens(line: &[u8]) -> Option<(u64, u64)> {
+pub(crate) fn try_parse_turn_tokens(line: &[u8]) -> Option<(u64, u64, u64, u64)> {
     let v: serde_json::Value = serde_json::from_slice(line).ok()?;
     v.get("id")?; // must be a response (has id)
     let usage = v.get("result")?.get("usage")?;
     let input = usage.get("inputTokens")?.as_u64()?;
     let output = usage.get("outputTokens")?.as_u64()?;
-    Some((input, output))
+    let cache_read = usage.get("cachedReadTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_write = usage.get("cachedWriteTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    Some((input, output, cache_read, cache_write))
 }
 
 /// Rewrite outgoing JSON-RPC method names that claude-code-acp exposes without
@@ -207,14 +209,6 @@ pub(crate) async fn rpc_actor(
                     let sdk_prompt = prompt.into_iter().map(to_sdk_content_block).collect();
                     let req = sdk::PromptRequest::new(session_id, sdk_prompt);
                     let result = conn.prompt(req).await;
-                    if let Ok(ref resp) = result {
-                        if let Some(ref usage) = resp.usage {
-                            let _ = event_tx.send((agent_id, AcpEvent::TurnTokens {
-                                input_tokens: usage.input_tokens,
-                                output_tokens: usage.output_tokens,
-                            }));
-                        }
-                    }
                     let result = result
                         .map(|resp| convert_stop_reason(resp.stop_reason))
                         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")));
