@@ -65,7 +65,7 @@ impl HelixMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[rmcp::tool(description = "Search file contents with a regex pattern. Returns matches with line numbers and optional context lines.")]
+    #[rmcp::tool(description = "Search file contents with a regex pattern. Returns matches with line numbers and optional context lines. Max 500 matches.")]
     async fn search(
         &self,
         params: Parameters<tools::fs::SearchParams>,
@@ -137,7 +137,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Rename a symbol at the given file position via LSP. Applies workspace-wide edits after user approval.")]
+    #[rmcp::tool(description = "Rename a symbol at the given file position (0-indexed line/col) via LSP. Applies workspace-wide edits after user approval.")]
     async fn rename_symbol(
         &self,
         params: Parameters<tools::write::RenameSymbolParams>,
@@ -173,7 +173,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Find all references to the symbol at the given file position via LSP textDocument/references.")]
+    #[rmcp::tool(description = "Find all references to the symbol at the given file position (0-indexed line/col) via LSP textDocument/references.")]
     async fn find_refs(
         &self,
         params: Parameters<tools::symbols::FindRefsParams>,
@@ -191,7 +191,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the current cursor position, editor mode, and selection count.")]
+    #[rmcp::tool(description = "Get the current cursor position (1-indexed line/col), editor mode, and selection count.")]
     async fn get_cursor(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -199,7 +199,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get all selection ranges for a file, including anchor/head positions and selected text.")]
+    #[rmcp::tool(description = "Get all selection ranges for a file, including anchor/head positions (1-indexed) and selected text.")]
     async fn get_selections(
         &self,
         params: Parameters<tools::editor::GetSelectionsParams>,
@@ -208,7 +208,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the visible viewport range (first/last visible line) for a file.")]
+    #[rmcp::tool(description = "Get the visible viewport range (1-indexed first/last visible line) for a file.")]
     async fn get_viewport(
         &self,
         params: Parameters<tools::editor::GetViewportParams>,
@@ -217,7 +217,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get diagnostic information for a specific file from the language server.")]
+    #[rmcp::tool(description = "Get diagnostics (errors/warnings) from the language server. Returns 0-indexed line/col. Omit path to get all workspace diagnostics.")]
     async fn get_diagnostics(
         &self,
         params: Parameters<tools::lsp_extras::GetDiagnosticsParams>,
@@ -226,7 +226,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get hover information (type, documentation) for a symbol at the specified position.")]
+    #[rmcp::tool(description = "Get hover information (type, documentation) for a symbol at the specified position (0-indexed line/col). Returns null (not error) when no hover info available.")]
     async fn hover(
         &self,
         params: Parameters<tools::lsp_extras::HoverParams>,
@@ -235,7 +235,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get available code actions (quick fixes, refactors) at the specified position.")]
+    #[rmcp::tool(description = "Get available code actions (quick fixes, refactors) at the specified position (0-indexed line/col).")]
     async fn code_actions(
         &self,
         params: Parameters<tools::lsp_extras::CodeActionsParams>,
@@ -244,7 +244,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get inlay hints (type annotations, parameter names) for a line range in a file.")]
+    #[rmcp::tool(description = "Get inlay hints (type annotations, parameter names) for a line range (0-indexed) in a file.")]
     async fn inlay_hints(
         &self,
         params: Parameters<tools::lsp_extras::InlayHintsParams>,
@@ -253,7 +253,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get completion suggestions at the specified position in a file.")]
+    #[rmcp::tool(description = "Get completion suggestions at the specified position (0-indexed line/col) in a file.")]
     async fn completions(
         &self,
         params: Parameters<tools::lsp_extras::CompletionsParams>,
@@ -262,7 +262,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get function signature help (active signature and parameter info) at the specified position.")]
+    #[rmcp::tool(description = "Get function signature help (active signature and parameter info) at the specified position (0-indexed line/col).")]
     async fn signature_help(
         &self,
         params: Parameters<tools::lsp_extras::SignatureHelpParams>,
@@ -398,7 +398,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get VCS diff hunks for a file (requires it to be open in the editor).")]
+    #[rmcp::tool(description = "Get VCS diff hunks for a file (requires it to be open in the editor). Returns hunks with kind: added/deleted/modified.")]
     async fn diff_hunks(
         &self,
         params: Parameters<tools::vcs::DiffHunksParams>,
@@ -452,7 +452,7 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the jumplist for the current view (navigation history).")]
+    #[rmcp::tool(description = "Get the jumplist for the current view (navigation history, up to 30 entries).")]
     async fn get_jumplist(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
