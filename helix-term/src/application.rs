@@ -3741,6 +3741,14 @@ impl Application {
             } => {
                 self.show_acp_permission_dialog(agent_id, params, reply);
             }
+            AcpSideEffect::QuestionDialog {
+                agent_id: _,
+                question,
+                options,
+                reply,
+            } => {
+                self.show_acp_question_dialog(question, options, reply);
+            }
         }
     }
 
@@ -3873,6 +3881,55 @@ impl Application {
 
         self.compositor.replace_or_push("acp-permission", select);
     }
+
+    /// Build and push an AskUserQuestion dialog onto the compositor.
+    fn show_acp_question_dialog(
+        &mut self,
+        question: String,
+        options: Vec<helix_acp::sdk::PermissionOption>,
+        reply: helix_acp::ReplyChannel<helix_acp::sdk::RequestPermissionResponse>,
+    ) {
+        use helix_acp::sdk::{
+            RequestPermissionOutcome, RequestPermissionResponse, SelectedPermissionOutcome,
+        };
+
+        if options.is_empty() {
+            let _ = reply.lock().unwrap().take().map(|tx| {
+                let _ = tx.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+            });
+            return;
+        }
+
+        let items: Vec<QuestionOption> = options.into_iter().map(QuestionOption).collect();
+
+        let select = ui::Select::new(
+            question,
+            items,
+            (),
+            move |_editor, option: &QuestionOption, event| {
+                use crate::ui::PromptEvent;
+                let response = match event {
+                    PromptEvent::Update => return,
+                    PromptEvent::Validate => RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                            option.0.option_id.clone(),
+                        )),
+                    ),
+                    PromptEvent::Abort => RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ),
+                };
+                let _ = reply.lock().unwrap().take().map(|tx| tx.send(response));
+            },
+        )
+        .no_auto_close()
+        .with_id("acp-question");
+
+        self.compositor.replace_or_push("acp-question", select);
+    }
+
 
 
     /// If MCP trace mode is enabled, switch to the document at `path` and
@@ -4656,6 +4713,17 @@ impl ui::menu::Item for PermOption {
         }
     }
 }
+
+/// Wraps a permission option as an answer choice for AskUserQuestion dialogs.
+struct QuestionOption(helix_acp::sdk::PermissionOption);
+
+impl ui::menu::Item for QuestionOption {
+    type Data = ();
+    fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
+        self.0.name.as_str().into()
+    }
+}
+
 
 /// Two-option enum for MCP write-operation approval popups.
 #[derive(Clone)]
