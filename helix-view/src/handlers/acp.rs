@@ -24,6 +24,13 @@ pub enum AcpSideEffect {
         params: sdk::RequestPermissionRequest,
         reply: ReplyChannel<sdk::RequestPermissionResponse>,
     },
+    /// An AskUserQuestion dialog should be shown.
+    QuestionDialog {
+        agent_id: AgentId,
+        question: String,
+        options: Vec<sdk::PermissionOption>,
+        reply: ReplyChannel<sdk::RequestPermissionResponse>,
+    },
 }
 
 /// Register ACP event hooks. Call once during startup.
@@ -51,22 +58,51 @@ impl Editor {
             }
 
             AcpEvent::RequestPermission { params, reply } => {
-                // Push plan text to display buffer before handing off to the UI.
-                if let Some(plan) = params
+                // Detect AskUserQuestion tool calls by title.
+                let is_question = params
                     .tool_call
                     .fields
-                    .raw_input
-                    .as_ref()
-                    .and_then(|ri| ri["plan"].as_str())
-                {
+                    .title
+                    .as_deref()
+                    == Some("AskUserQuestion");
+
+                if is_question {
+                    let question = params
+                        .tool_call
+                        .fields
+                        .raw_input
+                        .as_ref()
+                        .and_then(|ri| ri["question"].as_str())
+                        .unwrap_or("Question")
+                        .to_string();
+                    // Show the question in the agent panel.
                     if let Some(state) = self.acp.state_mut(agent_id) {
-                        state.append_text(plan);
+                        state.append_text(&question);
                     }
-                }
-                AcpSideEffect::PermissionDialog {
-                    agent_id,
-                    params,
-                    reply,
+                    AcpSideEffect::QuestionDialog {
+                        agent_id,
+                        question,
+                        options: params.options,
+                        reply,
+                    }
+                } else {
+                    // Push plan text to display buffer before handing off to the UI.
+                    if let Some(plan) = params
+                        .tool_call
+                        .fields
+                        .raw_input
+                        .as_ref()
+                        .and_then(|ri| ri["plan"].as_str())
+                    {
+                        if let Some(state) = self.acp.state_mut(agent_id) {
+                            state.append_text(plan);
+                        }
+                    }
+                    AcpSideEffect::PermissionDialog {
+                        agent_id,
+                        params,
+                        reply,
+                    }
                 }
             }
 
