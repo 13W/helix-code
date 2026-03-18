@@ -331,6 +331,17 @@ impl AgentPanel {
                         )));
                     }
                 }
+                DisplayLine::Error(msg) => {
+                    let error_style = helix_view::theme::Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD);
+                    for line in msg.lines() {
+                        lines.push(Spans::from(Span::styled(
+                            format!("✗ {line}"),
+                            error_style,
+                        )));
+                    }
+                }
                 DisplayLine::Separator => {
                     lines.push(Spans::from(Span::styled(
                         "─".repeat(40),
@@ -1009,8 +1020,8 @@ impl Component for AgentPanel {
                                     move |editor: &mut helix_view::Editor| {
                                         if let Some(s) = editor.acp.state_mut(agent_id) {
                                             s.is_prompting = false;
+                                            s.append_error(&format!("Error: {e}"));
                                         }
-                                        editor.set_error(format!("Agent error: {e}"));
                                     },
                                 )));
                             }
