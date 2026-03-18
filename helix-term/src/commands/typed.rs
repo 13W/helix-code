@@ -3036,8 +3036,8 @@ fn agent_prompt(
                 return Ok(Callback::Editor(Box::new(move |editor: &mut Editor| {
                     if let Some(s) = editor.acp.state_mut(agent_id) {
                         s.is_prompting = false;
+                        s.append_error(&format!("Error: {e}"));
                     }
-                    editor.set_error(format!("Agent error: {e}"));
                 })));
             }
             Ok(s) => s,

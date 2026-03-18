@@ -132,6 +132,11 @@ impl AcpState {
         }
     }
 
+    /// Append an error message to the display buffer.
+    pub fn append_error(&mut self, text: &str) {
+        self.display.push(DisplayLine::Error(text.to_string()));
+    }
+
     /// Record a new tool call in the display buffer.
     ///
     /// `edit_paths` should be `Some(paths)` for Edit-kind tools so we can
