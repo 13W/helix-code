@@ -270,6 +270,8 @@ pub enum DisplayLine {
     Separator,
     /// The text the user sent — echoed in the panel.
     UserMessage(String),
+    /// An error message — rendered prominently in red.
+    Error(String),
 }
 
 /// Accumulated token and cost statistics for the current session.
