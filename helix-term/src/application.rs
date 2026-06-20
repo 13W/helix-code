@@ -878,7 +878,7 @@ impl Application {
                     .documents()
                     .filter_map(|doc| {
                         doc.path().map(|p| BufferInfo {
-                            path: p.clone(),
+                            path: p.to_path_buf(),
                             language: doc.language_name().map(String::from),
                             is_modified: doc.is_modified(),
                             line_count: doc.text().len_lines(),
@@ -3620,10 +3620,18 @@ impl Application {
             }
 
             McpCommand::GetDiffBase { path, reply } => {
+                let trust_full = self
+                    .editor
+                    .workspace_trust
+                    .query(
+                        &helix_loader::find_workspace_in(path.parent().unwrap_or(&path)).0,
+                        helix_loader::workspace_trust::TrustQuery::Git,
+                    )
+                    .is_trusted();
                 let result = self
                     .editor
                     .diff_providers
-                    .get_diff_base(&path)
+                    .get_diff_base(&path, trust_full)
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .ok_or_else(|| {
                         anyhow::anyhow!("No diff base available for: {}", path.display())

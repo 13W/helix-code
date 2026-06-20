@@ -714,7 +714,7 @@ impl EditorView {
                 let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
                 let (icon_str, icon_color) = icons
                     .fs()
-                    .from_optional_path_or_lang(doc.path().map(|p| p.as_path()), lang)
+                    .from_optional_path_or_lang(doc.path(), lang)
                     .map(|icon| {
                         (Some(format!(" {icon}")), icon.color())
                     })
@@ -869,7 +869,7 @@ impl EditorView {
                 if t.modified { "[+] " } else { "" }
             );
             let rem = right_edge.saturating_sub(x) as usize;
-            x = surface.set_stringn(x, viewport.y, text, rem, style).0;
+            x = surface.set_stringn(x, viewport.y, &text, rem, style).0;
         }
 
             // let used_width = viewport.x.saturating_sub(x);

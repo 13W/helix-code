@@ -91,6 +91,7 @@ dashmap = "6.0"
 similar = "2"
 
 parking_lot.workspace = true
+chrono = "0.4.45"
 
 [target.'cfg(windows)'.dependencies]
 crossterm = { version = "0.28", features = ["event-stream"] }
