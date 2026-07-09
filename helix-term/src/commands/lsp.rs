@@ -942,13 +942,6 @@ struct CodeActionOrCommandItem {
     language_server_id: LanguageServerId,
 }
 
-impl ui::menu::Item for CodeActionOrCommandItem {
-    type Data = ();
-    fn format(&self, _data: &Self::Data) -> Row<'_> {
-        self.title().into()
-    }
-}
-
 impl ui::menu::Item for CodeActionItem {
     type Data = ();
     fn format(&self, _data: &Self::Data) -> Row<'_> {
