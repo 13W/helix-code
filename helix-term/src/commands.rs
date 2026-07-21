@@ -462,6 +462,7 @@ impl MappableCommand {
         goto_last_change, "Goto last change",
         show_diff_base, "Show original hunk text at cursor (VCS diff base)",
         show_diff_view, "Open side-by-side diff view of the entire file",
+        markdown_preview, "Preview the current document rendered as markdown",
         goto_line_start, "Goto line start",
         goto_line_end, "Goto line end",
         goto_column, "Goto column",
@@ -4429,6 +4430,18 @@ fn show_diff_view(cx: &mut Context) {
         let view =
             DiffBaseView::new_full_file(base_text, doc_text, language, all_hunks, cursor_line);
         compositor.replace_or_push(DiffBaseView::ID, overlaid(view));
+    }));
+}
+
+fn markdown_preview(cx: &mut Context) {
+    let doc = doc!(cx.editor);
+    let contents = doc.text().to_string();
+    let loader = cx.editor.syn_loader.clone();
+
+    cx.callback.push(Box::new(move |compositor, _cx| {
+        use crate::ui::{markdown_preview::MarkdownPreview, overlay::overlaid};
+        let view = MarkdownPreview::new(contents, loader);
+        compositor.replace_or_push(MarkdownPreview::ID, overlaid(view));
     }));
 }
 

@@ -291,6 +291,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "k" => hover,
             "K" => show_diff_base,
             "V" => show_diff_view,
+            "m" => markdown_preview,
             "r" => rename_symbol,
             "h" => select_references_to_symbol_under_cursor,
             "c" => toggle_comments,

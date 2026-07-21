@@ -141,6 +141,11 @@ pub struct Markdown {
     contents: String,
 
     config_loader: Arc<ArcSwap<syntax::Loader>>,
+
+    /// When set, tables wider than this many columns are shrunk (columns
+    /// narrowed, cell text wrapped) so the whole table fits. `None` keeps the
+    /// natural, content-sized table (the default for hover/agent panel/etc.).
+    max_table_width: Option<usize>,
 }
 
 // TODO: pre-render and self reference via Pin
@@ -166,7 +171,15 @@ impl Markdown {
         Self {
             contents,
             config_loader,
+            max_table_width: None,
         }
+    }
+
+    /// Constrain rendered tables to at most `width` columns, wrapping cell text
+    /// across multiple rows as needed.
+    pub fn with_max_table_width(mut self, width: usize) -> Self {
+        self.max_table_width = Some(width);
+        self
     }
 
     pub fn parse(&self, theme: Option<&Theme>) -> tui::text::Text<'_> {
@@ -309,56 +322,73 @@ impl Markdown {
                             col_widths[i] = col_widths[i].max(cell.chars().count());
                         }
                     }
-                    // top border
-                    {
-                        let mut s = String::from("┌");
+
+                    // Optionally shrink columns so the whole table fits `max_table_width`.
+                    // Frame overhead per line is `1 + 3 * num_cols` (borders + padding).
+                    if let Some(max_w) = self.max_table_width {
+                        if num_cols > 0 {
+                            let target = max_w.saturating_sub(1 + 3 * num_cols);
+                            const MIN_COL: usize = 3;
+                            while col_widths.iter().sum::<usize>() > target {
+                                let (idx, &widest) = col_widths
+                                    .iter()
+                                    .enumerate()
+                                    .max_by_key(|(_, &w)| w)
+                                    .unwrap();
+                                if widest <= MIN_COL {
+                                    break; // can't shrink further; allow overflow
+                                }
+                                col_widths[idx] = widest - 1;
+                            }
+                        }
+                    }
+
+                    let border = |left: char, mid: char, right: char| -> Spans<'static> {
+                        let mut s = String::new();
+                        s.push(left);
                         for (i, &w) in col_widths.iter().enumerate() {
                             s.push_str(&"─".repeat(w + 2));
-                            s.push(if i + 1 < col_widths.len() { '┬' } else { '┐' });
+                            s.push(if i + 1 < col_widths.len() { mid } else { right });
                         }
-                        lines.push(Spans::from(Span::styled(s, text_style)));
-                    }
+                        Spans::from(Span::styled(s, text_style))
+                    };
+
+                    lines.push(border('┌', '┬', '┐'));
                     for (row_idx, (row, &is_head)) in
                         table_rows.iter().zip(table_is_head.iter()).enumerate()
                     {
-                        // render row
-                        {
-                            let mut s = String::from("│");
-                            for (i, cell) in row.iter().enumerate() {
+                        // Wrap every cell to its column width; the row spans as
+                        // many physical lines as the tallest wrapped cell.
+                        let wrapped: Vec<Vec<String>> = (0..num_cols)
+                            .map(|i| {
                                 let w = col_widths.get(i).copied().unwrap_or(1);
-                                let align = table_alignments
-                                    .get(i)
-                                    .copied()
-                                    .unwrap_or(Alignment::None);
-                                let padded = align_cell(cell, w, align);
+                                let cell = row.get(i).map(String::as_str).unwrap_or("");
+                                wrap_text(cell, w)
+                            })
+                            .collect();
+                        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+                        let style = if is_head {
+                            text_style.add_modifier(Modifier::BOLD)
+                        } else {
+                            text_style
+                        };
+                        for k in 0..height {
+                            let mut s = String::from("│");
+                            for i in 0..num_cols {
+                                let w = col_widths.get(i).copied().unwrap_or(1);
+                                let align =
+                                    table_alignments.get(i).copied().unwrap_or(Alignment::None);
+                                let piece = wrapped[i].get(k).map(String::as_str).unwrap_or("");
                                 s.push(' ');
-                                s.push_str(&padded);
+                                s.push_str(&align_cell(piece, w, align));
                                 s.push_str(" │");
                             }
-                            let style = if is_head {
-                                text_style.add_modifier(Modifier::BOLD)
-                            } else {
-                                text_style
-                            };
                             lines.push(Spans::from(Span::styled(s, style)));
                         }
-                        let is_last = row_idx + 1 == table_rows.len();
-                        if is_last {
-                            // bottom border
-                            let mut s = String::from("└");
-                            for (i, &w) in col_widths.iter().enumerate() {
-                                s.push_str(&"─".repeat(w + 2));
-                                s.push(if i + 1 < col_widths.len() { '┴' } else { '┘' });
-                            }
-                            lines.push(Spans::from(Span::styled(s, text_style)));
+                        if row_idx + 1 == table_rows.len() {
+                            lines.push(border('└', '┴', '┘'));
                         } else {
-                            // row divider
-                            let mut s = String::from("├");
-                            for (i, &w) in col_widths.iter().enumerate() {
-                                s.push_str(&"─".repeat(w + 2));
-                                s.push(if i + 1 < col_widths.len() { '┼' } else { '┤' });
-                            }
-                            lines.push(Spans::from(Span::styled(s, text_style)));
+                            lines.push(border('├', '┼', '┤'));
                         }
                     }
                     lines.push(Spans::default()); // blank line after table
@@ -495,6 +525,53 @@ impl Component for Markdown {
     }
 }
 
+/// Word-wrap a plain table cell to `width` columns (counted in characters, to
+/// match `align_cell`). Words longer than `width` are hard-split. Always returns
+/// at least one (possibly empty) line.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_len = 0usize; // in chars
+
+    for word in s.split(' ') {
+        let wlen = word.chars().count();
+        if wlen > width {
+            // Flush the current line, then hard-split the over-long word.
+            if line_len > 0 {
+                out.push(std::mem::take(&mut line));
+            }
+            let mut chunk = String::new();
+            let mut clen = 0usize;
+            for ch in word.chars() {
+                if clen == width {
+                    out.push(std::mem::take(&mut chunk));
+                    clen = 0;
+                }
+                chunk.push(ch);
+                clen += 1;
+            }
+            line = chunk;
+            line_len = clen;
+        } else if line_len == 0 {
+            line = word.to_string();
+            line_len = wlen;
+        } else if line_len + 1 + wlen <= width {
+            line.push(' ');
+            line.push_str(word);
+            line_len += 1 + wlen;
+        } else {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+            line_len = wlen;
+        }
+    }
+    out.push(line);
+    out
+}
+
 fn align_cell(text: &str, width: usize, align: Alignment) -> String {
     let len = text.chars().count();
     if len >= width {
@@ -509,5 +586,70 @@ fn align_cell(text: &str, width: usize, align: Alignment) -> String {
             format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
         }
         _ => format!("{:<width$}", text, width = width),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loader() -> Arc<ArcSwap<syntax::Loader>> {
+        Arc::new(ArcSwap::from_pointee(
+            helix_core::config::default_lang_loader(),
+        ))
+    }
+
+    fn line_texts(text: &tui::text::Text) -> Vec<String> {
+        text.lines
+            .iter()
+            .map(|l| l.0.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    const WIDE_TABLE: &str = "\
+| Column Alpha | Column Beta | Column Gamma |
+| ------------ | ----------- | ------------ |
+| a1 value long text here | b1 | c1 more text |
+";
+
+    #[test]
+    fn wrap_text_wraps_and_hard_splits() {
+        assert_eq!(wrap_text("hello world foo", 5), vec!["hello", "world", "foo"]);
+        assert_eq!(wrap_text("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        assert_eq!(wrap_text("", 10), vec![""]);
+        assert_eq!(wrap_text("anything", 0), vec![""]);
+    }
+
+    #[test]
+    fn table_fits_max_width() {
+        let md = Markdown::new(WIDE_TABLE.to_string(), loader()).with_max_table_width(40);
+        let lines = line_texts(&md.parse(None));
+        for line in &lines {
+            assert!(line.chars().count() <= 40, "line too wide: {line:?}");
+        }
+        // Header text is preserved (wrapped across lines).
+        let joined = lines.join("\n");
+        assert!(joined.contains("Column") && joined.contains("Alpha"));
+    }
+
+    #[test]
+    fn table_without_limit_is_unconstrained() {
+        let md = Markdown::new(WIDE_TABLE.to_string(), loader());
+        let lines = line_texts(&md.parse(None));
+        assert!(lines.iter().any(|l| l.chars().count() > 40));
+    }
+
+    #[test]
+    fn narrow_table_unchanged_by_limit() {
+        let src = "\
+| A | B |
+| - | - |
+| 1 | 2 |
+";
+        let plain_md = Markdown::new(src.to_string(), loader());
+        let plain = line_texts(&plain_md.parse(None));
+        let limited_md = Markdown::new(src.to_string(), loader()).with_max_table_width(80);
+        let limited = line_texts(&limited_md.parse(None));
+        assert_eq!(plain, limited);
     }
 }
