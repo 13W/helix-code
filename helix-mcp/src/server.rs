@@ -40,12 +40,26 @@ impl HelixMcpServer {
         }
     }
 
-    #[rmcp::tool(description = "Health-check — returns pong")]
+    #[rmcp::tool(
+        description = "Health-check — returns pong",
+        annotations(
+            title = "Health Check",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn ping(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         Ok(CallToolResult::success(vec![Content::text("pong")]))
     }
 
-    #[rmcp::tool(description = "List directory contents. Returns entries with path, kind (file/dir), and size for files.")]
+    #[rmcp::tool(
+        description = "List directory contents. Returns entries with path, kind (file/dir), and size for files.",
+        annotations(
+            title = "List Directory",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn list_dir(
         &self,
         params: Parameters<tools::fs::ListDirParams>,
@@ -55,7 +69,14 @@ impl HelixMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[rmcp::tool(description = "Find files matching a glob pattern (respects .gitignore). Returns list of matching file paths.")]
+    #[rmcp::tool(
+        description = "Find files matching a glob pattern (respects .gitignore). Returns list of matching file paths.",
+        annotations(
+            title = "Find Files",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn find_files(
         &self,
         params: Parameters<tools::fs::FindFilesParams>,
@@ -65,7 +86,14 @@ impl HelixMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[rmcp::tool(description = "Search file contents with a regex pattern. Returns matches with line numbers and optional context lines. Max 500 matches.")]
+    #[rmcp::tool(
+        description = "Search file contents with a regex pattern. Returns matches with line numbers and optional context lines. Max 500 matches.",
+        annotations(
+            title = "Search File Contents",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn search(
         &self,
         params: Parameters<tools::fs::SearchParams>,
@@ -75,7 +103,14 @@ impl HelixMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[rmcp::tool(description = "Read a file — from editor buffer if open (sees unsaved changes), otherwise from disk")]
+    #[rmcp::tool(
+        description = "Read a file — from editor buffer if open (sees unsaved changes), otherwise from disk",
+        annotations(
+            title = "Read File",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn read_file(
         &self,
         params: Parameters<tools::read::ReadFileParams>,
@@ -84,7 +119,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Read a line range from a file (0-indexed, end_line inclusive). Includes line numbers in output.")]
+    #[rmcp::tool(
+        description = "Read a line range from a file (0-indexed, end_line inclusive). Includes line numbers in output.",
+        annotations(
+            title = "Read Line Range",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn read_range(
         &self,
         params: Parameters<tools::read::ReadRangeParams>,
@@ -93,7 +135,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "List all open editor buffers with path, language, modified status, line count, and LSP servers")]
+    #[rmcp::tool(
+        description = "List all open editor buffers with path, language, modified status, line count, and LSP servers",
+        annotations(
+            title = "List Open Buffers",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_open_buffers(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -101,7 +150,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Write (overwrite) a file with new content. Shows a diff and requires user approval before applying.")]
+    #[rmcp::tool(
+        description = "Write (overwrite) a file with new content. Shows a diff and requires user approval before applying.",
+        annotations(
+            title = "Write File",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn write_file(
         &self,
         params: Parameters<tools::write::WriteFileParams>,
@@ -110,7 +168,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Apply multiple line-based text edits to a file atomically. Shows a diff and requires user approval.")]
+    #[rmcp::tool(
+        description = "Apply multiple line-based text edits to a file atomically. Shows a diff and requires user approval.",
+        annotations(
+            title = "Patch File",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn patch_file(
         &self,
         params: Parameters<tools::write::PatchFileParams>,
@@ -119,7 +186,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Insert text before a given line (1-indexed). Requires user approval.")]
+    #[rmcp::tool(
+        description = "Insert text before a given line (1-indexed). Requires user approval.",
+        annotations(
+            title = "Insert Text",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn insert_text(
         &self,
         params: Parameters<tools::write::InsertTextParams>,
@@ -128,7 +204,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Find-and-replace an exact string in a file, replace a line range, or both. Shows diff and requires user approval. Params: old_string (exact text to find), new_string (replacement, required), start_line/end_line (1-indexed scope or range).")]
+    #[rmcp::tool(
+        description = "Find-and-replace an exact string in a file, replace a line range, or both. Shows diff and requires user approval. Params: old_string (exact text to find), new_string (replacement, required), start_line/end_line (1-indexed scope or range).",
+        annotations(
+            title = "Edit File",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn edit_file(
         &self,
         params: Parameters<tools::write::EditFileParams>,
@@ -137,7 +222,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Rename a symbol at the given file position (0-indexed line/col) via LSP. Applies workspace-wide edits after user approval.")]
+    #[rmcp::tool(
+        description = "Rename a symbol at the given file position (0-indexed line/col) via LSP. Applies workspace-wide edits after user approval.",
+        annotations(
+            title = "Rename Symbol",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn rename_symbol(
         &self,
         params: Parameters<tools::write::RenameSymbolParams>,
@@ -146,7 +240,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Replace the body of a symbol identified by name-path (e.g. 'MyStruct' or 'MyStruct/my_method'). Shows a diff and requires user approval.")]
+    #[rmcp::tool(
+        description = "Replace the body of a symbol identified by name-path (e.g. 'MyStruct' or 'MyStruct/my_method'). Shows a diff and requires user approval.",
+        annotations(
+            title = "Replace Symbol Body",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn replace_symbol(
         &self,
         params: Parameters<tools::write::ReplaceSymbolParams>,
@@ -155,7 +258,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get a high-level overview of symbols (functions, structs, etc.) in a file via LSP documentSymbol.")]
+    #[rmcp::tool(
+        description = "Get a high-level overview of symbols (functions, structs, etc.) in a file via LSP documentSymbol.",
+        annotations(
+            title = "Symbols Overview",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_symbols_overview(
         &self,
         params: Parameters<tools::symbols::GetSymbolsOverviewParams>,
@@ -164,7 +274,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Find symbols by name across the workspace via LSP workspace/symbol.")]
+    #[rmcp::tool(
+        description = "Find symbols by name across the workspace via LSP workspace/symbol.",
+        annotations(
+            title = "Find Symbol",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn find_symbol(
         &self,
         params: Parameters<tools::symbols::FindSymbolParams>,
@@ -173,7 +290,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Find all references to the symbol at the given file position (0-indexed line/col) via LSP textDocument/references.")]
+    #[rmcp::tool(
+        description = "Find all references to the symbol at the given file position (0-indexed line/col) via LSP textDocument/references.",
+        annotations(
+            title = "Find References",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn find_refs(
         &self,
         params: Parameters<tools::symbols::FindRefsParams>,
@@ -182,7 +306,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Read the source body of a symbol by name-path (e.g. 'MyStruct' or 'MyStruct/my_method').")]
+    #[rmcp::tool(
+        description = "Read the source body of a symbol by name-path (e.g. 'MyStruct' or 'MyStruct/my_method').",
+        annotations(
+            title = "Read Symbol Source",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn read_symbol(
         &self,
         params: Parameters<tools::symbols::ReadSymbolParams>,
@@ -191,7 +322,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the current cursor position (1-indexed line/col), editor mode, and selection count.")]
+    #[rmcp::tool(
+        description = "Get the current cursor position (1-indexed line/col), editor mode, and selection count.",
+        annotations(
+            title = "Get Cursor Position",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_cursor(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -199,7 +337,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get all selection ranges for a file, including anchor/head positions (1-indexed) and selected text.")]
+    #[rmcp::tool(
+        description = "Get all selection ranges for a file, including anchor/head positions (1-indexed) and selected text.",
+        annotations(
+            title = "Get Selections",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_selections(
         &self,
         params: Parameters<tools::editor::GetSelectionsParams>,
@@ -208,7 +353,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the visible viewport range (1-indexed first/last visible line) for a file.")]
+    #[rmcp::tool(
+        description = "Get the visible viewport range (1-indexed first/last visible line) for a file.",
+        annotations(
+            title = "Get Viewport",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_viewport(
         &self,
         params: Parameters<tools::editor::GetViewportParams>,
@@ -217,7 +369,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get diagnostics (errors/warnings) from the language server. Returns 0-indexed line/col. Omit path to get all workspace diagnostics.")]
+    #[rmcp::tool(
+        description = "Get diagnostics (errors/warnings) from the language server. Returns 0-indexed line/col. Omit path to get all workspace diagnostics.",
+        annotations(
+            title = "Get Diagnostics",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_diagnostics(
         &self,
         params: Parameters<tools::lsp_extras::GetDiagnosticsParams>,
@@ -226,7 +385,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get hover information (type, documentation) for a symbol at the specified position (0-indexed line/col). Returns null (not error) when no hover info available.")]
+    #[rmcp::tool(
+        description = "Get hover information (type, documentation) for a symbol at the specified position (0-indexed line/col). Returns null (not error) when no hover info available.",
+        annotations(
+            title = "Hover Info",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn hover(
         &self,
         params: Parameters<tools::lsp_extras::HoverParams>,
@@ -235,7 +401,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get available code actions (quick fixes, refactors) at the specified position (0-indexed line/col).")]
+    #[rmcp::tool(
+        description = "Get available code actions (quick fixes, refactors) at the specified position (0-indexed line/col).",
+        annotations(
+            title = "List Code Actions",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn code_actions(
         &self,
         params: Parameters<tools::lsp_extras::CodeActionsParams>,
@@ -244,7 +417,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get inlay hints (type annotations, parameter names) for a line range (0-indexed) in a file.")]
+    #[rmcp::tool(
+        description = "Get inlay hints (type annotations, parameter names) for a line range (0-indexed) in a file.",
+        annotations(
+            title = "Get Inlay Hints",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn inlay_hints(
         &self,
         params: Parameters<tools::lsp_extras::InlayHintsParams>,
@@ -253,7 +433,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get completion suggestions at the specified position (0-indexed line/col) in a file.")]
+    #[rmcp::tool(
+        description = "Get completion suggestions at the specified position (0-indexed line/col) in a file.",
+        annotations(
+            title = "Get Completions",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn completions(
         &self,
         params: Parameters<tools::lsp_extras::CompletionsParams>,
@@ -262,7 +449,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get function signature help (active signature and parameter info) at the specified position (0-indexed line/col).")]
+    #[rmcp::tool(
+        description = "Get function signature help (active signature and parameter info) at the specified position (0-indexed line/col).",
+        annotations(
+            title = "Get Signature Help",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn signature_help(
         &self,
         params: Parameters<tools::lsp_extras::SignatureHelpParams>,
@@ -271,7 +465,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Return all breakpoints, optionally filtered by file path.")]
+    #[rmcp::tool(
+        description = "Return all breakpoints, optionally filtered by file path.",
+        annotations(
+            title = "List Breakpoints",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_breakpoints(
         &self,
         params: Parameters<tools::dap::GetBreakpointsParams>,
@@ -280,7 +481,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Set a breakpoint at the given path and line (0-indexed). Requires user approval.")]
+    #[rmcp::tool(
+        description = "Set a breakpoint at the given path and line (0-indexed). Requires user approval.",
+        annotations(
+            title = "Set Breakpoint",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn set_breakpoint(
         &self,
         params: Parameters<tools::dap::SetBreakpointParams>,
@@ -289,7 +499,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Remove the breakpoint at the given path and line (0-indexed).")]
+    #[rmcp::tool(
+        description = "Remove the breakpoint at the given path and line (0-indexed).",
+        annotations(
+            title = "Remove Breakpoint",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn remove_breakpoint(
         &self,
         params: Parameters<tools::dap::RemoveBreakpointParams>,
@@ -298,7 +517,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get current DAP debugger session status (active, paused, thread/frame info).")]
+    #[rmcp::tool(
+        description = "Get current DAP debugger session status (active, paused, thread/frame info).",
+        annotations(
+            title = "Get Debugger Status",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_dap_status(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -306,7 +532,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the call stack frames for the active (or specified) thread. Requires debugger to be paused.")]
+    #[rmcp::tool(
+        description = "Get the call stack frames for the active (or specified) thread. Requires debugger to be paused.",
+        annotations(
+            title = "Get Stack Trace",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_stack_trace(
         &self,
         params: Parameters<tools::dap::GetStackTraceParams>,
@@ -315,7 +548,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get variable scopes for the given stack frame id. Requires debugger to be paused.")]
+    #[rmcp::tool(
+        description = "Get variable scopes for the given stack frame id. Requires debugger to be paused.",
+        annotations(
+            title = "Get Variable Scopes",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_scopes(
         &self,
         params: Parameters<tools::dap::GetScopesParams>,
@@ -324,7 +564,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get variables for a scope. Pass variables_ref from get_scopes to query a specific scope directly. Or pass frame_id to auto-resolve locals without needing get_scopes first (scope_name defaults to 'local'; pass 'register' to get CPU registers). Requires debugger to be paused.")]
+    #[rmcp::tool(
+        description = "Get variables for a scope. Pass variables_ref from get_scopes to query a specific scope directly. Or pass frame_id to auto-resolve locals without needing get_scopes first (scope_name defaults to 'local'; pass 'register' to get CPU registers). Requires debugger to be paused.",
+        annotations(
+            title = "Get Variables",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_variables(
         &self,
         params: Parameters<tools::dap::GetVariablesParams>,
@@ -333,7 +580,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Resume execution of the paused debugger thread.")]
+    #[rmcp::tool(
+        description = "Resume execution of the paused debugger thread.",
+        annotations(
+            title = "Resume Debugger",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_continue(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -341,7 +597,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Pause the running debugger thread.")]
+    #[rmcp::tool(
+        description = "Pause the running debugger thread.",
+        annotations(
+            title = "Pause Debugger",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_pause(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -349,7 +614,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Step over the current line (next line, does not step into calls).")]
+    #[rmcp::tool(
+        description = "Step over the current line (next line, does not step into calls).",
+        annotations(
+            title = "Step Over",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_step_over(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -357,7 +631,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Step into a function call on the current line.")]
+    #[rmcp::tool(
+        description = "Step into a function call on the current line.",
+        annotations(
+            title = "Step Into",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_step_in(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -365,7 +648,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Step out of the current function back to its caller.")]
+    #[rmcp::tool(
+        description = "Step out of the current function back to its caller.",
+        annotations(
+            title = "Step Out",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_step_out(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -373,7 +665,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "List debug templates available for the focused document's language. Call this before dap_launch to discover template names and required parameters.")]
+    #[rmcp::tool(
+        description = "List debug templates available for the focused document's language. Call this before dap_launch to discover template names and required parameters.",
+        annotations(
+            title = "List Debug Templates",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_list_templates(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -381,7 +680,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Launch a debug session for the focused document. Use dap_list_templates first to discover the template_name and required params.")]
+    #[rmcp::tool(
+        description = "Launch a debug session for the focused document. Use dap_list_templates first to discover the template_name and required params.",
+        annotations(
+            title = "Launch Debug Session",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_launch(
         &self,
         params: Parameters<tools::dap::DapLaunchParams>,
@@ -390,7 +698,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Terminate the active debug session.")]
+    #[rmcp::tool(
+        description = "Terminate the active debug session.",
+        annotations(
+            title = "Terminate Debug Session",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn dap_terminate(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -398,7 +715,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get VCS diff hunks for a file (requires it to be open in the editor). Returns hunks with kind: added/deleted/modified.")]
+    #[rmcp::tool(
+        description = "Get VCS diff hunks for a file (requires it to be open in the editor). Returns hunks with kind: added/deleted/modified.",
+        annotations(
+            title = "Get Diff Hunks",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn diff_hunks(
         &self,
         params: Parameters<tools::vcs::DiffHunksParams>,
@@ -407,7 +731,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the HEAD (base) content of a file via VCS diff providers.")]
+    #[rmcp::tool(
+        description = "Get the HEAD (base) content of a file via VCS diff providers.",
+        annotations(
+            title = "Get Diff Base Content",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn diff_base(
         &self,
         params: Parameters<tools::vcs::DiffBaseParams>,
@@ -416,7 +747,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Load a file into the editor buffer without displaying it. Use before calling diff_hunks on files not currently open. The file will not appear in any view.")]
+    #[rmcp::tool(
+        description = "Load a file into the editor buffer without displaying it. Use before calling diff_hunks on files not currently open. The file will not appear in any view.",
+        annotations(
+            title = "Load File Into Buffer",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn load_file(
         &self,
         params: Parameters<tools::buffer::LoadFileParams>,
@@ -425,7 +765,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Unload a background-loaded file from the editor buffer. Only works on files not currently visible in any view. Use after you are done with diff_hunks or other buffer-dependent tools.")]
+    #[rmcp::tool(
+        description = "Unload a background-loaded file from the editor buffer. Only works on files not currently visible in any view. Use after you are done with diff_hunks or other buffer-dependent tools.",
+        annotations(
+            title = "Unload Background Buffer",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn unload_file(
         &self,
         params: Parameters<tools::buffer::UnloadFileParams>,
@@ -434,7 +783,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Read the values stored in a named Helix register (e.g. '/', '+', 'a').")]
+    #[rmcp::tool(
+        description = "Read the values stored in a named Helix register (e.g. '/', '+', 'a').",
+        annotations(
+            title = "Read Register",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn read_register(
         &self,
         params: Parameters<tools::registers::ReadRegisterParams>,
@@ -443,7 +799,16 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Write values to a named Helix register. Only alphabetic registers and '+' / '*' are writable.")]
+    #[rmcp::tool(
+        description = "Write values to a named Helix register. Only alphabetic registers and '+' / '*' are writable.",
+        annotations(
+            title = "Write Register",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn write_register(
         &self,
         params: Parameters<tools::registers::WriteRegisterParams>,
@@ -452,7 +817,14 @@ impl HelixMcpServer {
             .map_err(tools::fs::to_mcp_err)
     }
 
-    #[rmcp::tool(description = "Get the jumplist for the current view (navigation history, up to 30 entries).")]
+    #[rmcp::tool(
+        description = "Get the jumplist for the current view (navigation history, up to 30 entries).",
+        annotations(
+            title = "Get Jumplist",
+            read_only_hint = true,
+            open_world_hint = false,
+        )
+    )]
     async fn get_jumplist(
         &self,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
