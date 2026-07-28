@@ -162,6 +162,23 @@ impl McpClient {
         }))
         .await
     }
+
+    /// Call `tools/list` and return the `tools` array.
+    async fn list_tools(&self) -> anyhow::Result<Value> {
+        let id = self.next_id();
+        let resp = self
+            .post_rpc(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .await?;
+        if let Some(err) = resp.get("error") {
+            bail!("JSON-RPC error: {err}");
+        }
+        Ok(resp["result"]["tools"].clone())
+    }
 }
 
 // ─── Protocol helpers ─────────────────────────────────────────────────────────
@@ -254,6 +271,60 @@ async fn test_ping() -> anyhow::Result<()> {
         "pong",
         "ping should return \"pong\""
     );
+    Ok(())
+}
+
+// ── 01b: tools/list annotations ─────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_list_annotations() -> anyhow::Result<()> {
+    let port = start_mcp_server().await?;
+    let client = McpClient::connect(port).await?;
+
+    let tools = client.list_tools().await?;
+    let tools = tools.as_array().context("tools should be a JSON array")?;
+
+    let find = |name: &str| -> &Value {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("tool {name} not found in tools/list"))
+    };
+
+    for name in ["ping", "read_file", "search", "list_dir", "get_diagnostics", "get_breakpoints"] {
+        let annotations = &find(name)["annotations"];
+        assert_eq!(
+            annotations["readOnlyHint"],
+            json!(true),
+            "{name} should be annotated readOnlyHint: true"
+        );
+        assert_eq!(
+            annotations["openWorldHint"],
+            json!(false),
+            "{name} is local-only and should be annotated openWorldHint: false"
+        );
+        assert!(
+            annotations["title"].as_str().is_some_and(|t| !t.is_empty()),
+            "{name} should have a non-empty annotations.title"
+        );
+    }
+
+    let write_file = &find("write_file")["annotations"];
+    assert_ne!(
+        write_file["readOnlyHint"],
+        json!(true),
+        "write_file must not be marked read-only"
+    );
+    assert_eq!(write_file["destructiveHint"], json!(true));
+    assert_eq!(write_file["idempotentHint"], json!(true));
+
+    let insert_text = &find("insert_text")["annotations"];
+    assert_eq!(insert_text["destructiveHint"], json!(false));
+    assert_eq!(insert_text["idempotentHint"], json!(false));
+
+    let dap_step_over = &find("dap_step_over")["annotations"];
+    assert_eq!(dap_step_over["idempotentHint"], json!(false));
+
     Ok(())
 }
 
