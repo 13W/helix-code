@@ -379,6 +379,9 @@ pub struct Config {
     pub search: SearchConfig,
     pub lsp: LspConfig,
     pub terminal: Option<TerminalConfig>,
+    /// Claude Code IDE integration (`claude --ide` / `/ide`).
+    #[serde(default)]
+    pub claude_ide: ClaudeIdeConfig,
     /// Column numbers at which to draw the rulers. Defaults to `[]`, meaning no rulers.
     pub rulers: Vec<u16>,
     #[serde(default)]
@@ -571,6 +574,44 @@ pub struct TerminalConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+}
+
+/// How a Claude Code `openDiff` proposal is presented to the user.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudeIdeDiffMode {
+    /// A modal prompt with a unified diff preview and Apply / Cancel.
+    #[default]
+    Prompt,
+    /// A vertical split with the current file on the left and the proposal on
+    /// the right; accept with `:claude-diff-accept`.
+    Split,
+}
+
+/// `[editor.claude-ide]`: the Claude Code IDE integration server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ClaudeIdeConfig {
+    /// Start the IDE server when Helix starts (same as `--claude-ide`).
+    pub enable: bool,
+    /// Name shown by `claude`'s `/ide` picker. Empty means the workspace
+    /// directory name.
+    pub name: String,
+    /// Send `selection_changed` notifications to the connected CLI.
+    pub notify_selection: bool,
+    /// How `openDiff` proposals are shown.
+    pub diff_mode: ClaudeIdeDiffMode,
+}
+
+impl Default for ClaudeIdeConfig {
+    fn default() -> Self {
+        ClaudeIdeConfig {
+            enable: false,
+            name: String::new(),
+            notify_selection: true,
+            diff_mode: ClaudeIdeDiffMode::Prompt,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -808,6 +849,9 @@ pub enum StatusLineElement {
 
     /// Indicator showing the number of active ACP agent sessions
     AcpSessionsIndicator,
+
+    /// Indicator for the Claude Code IDE server: shown when running, marked when a CLI is connected
+    ClaudeIdeIndicator,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs
@@ -1188,6 +1232,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             lsp: LspConfig::default(),
             terminal: get_terminal_provider(),
+            claude_ide: ClaudeIdeConfig::default(),
             rulers: Vec::new(),
             whitespace: WhitespaceConfig::default(),
             bufferline: BufferLine::default(),
@@ -1277,6 +1322,8 @@ pub struct Editor {
     pub mcp_addr: Option<std::net::SocketAddr>,
     /// Whether MCP trace mode is enabled: jumps cursor to edit location on write/edit.
     pub mcp_trace: bool,
+    /// Running Claude Code IDE server (`--claude-ide` / `:claude-ide-start`).
+    pub claude_ide: Option<helix_claude_ide::Session>,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
 
     pub syn_loader: Arc<ArcSwap<syntax::Loader>>,
@@ -1432,6 +1479,7 @@ impl Editor {
             acp: helix_acp::Registry::new(),
             mcp_addr: None,
             mcp_trace: false,
+            claude_ide: None,
             breakpoints: HashMap::new(),
             syn_loader,
             theme_loader,

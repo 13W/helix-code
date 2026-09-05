@@ -31,6 +31,7 @@ helix-lsp = { path = "../helix-lsp" }
 helix-dap = { path = "../helix-dap" }
 helix-vcs = { path = "../helix-vcs" }
 helix-acp = { path = "../helix-acp" }
+helix-claude-ide = { path = "../helix-claude-ide" }
 
 bitflags.workspace = true
 foldhash.workspace = true

@@ -160,6 +160,7 @@ The following statusline elements can be configured:
 | `version-control` | The current branch name or detached commit hash of the opened workspace |
 | `register` | The current selected register |
 | `code-action-hint` | Indicator for when code actions are available |
+| `claude-ide-indicator` | `✻` while the Claude Code IDE server is running, `✻◆` once a `claude` CLI is connected |
 
 ### `[editor.lsp]` Section
 
@@ -463,6 +464,27 @@ max-wrap = 25 # increase value to reduce forced mid-word wrapping
 max-indent-retain = 0
 wrap-indicator = ""  # set wrap-indicator to "" to hide it
 ```
+
+### `[editor.claude-ide]` Section
+
+Options for the Claude Code IDE integration: a local server that lets the
+`claude` CLI (`claude --ide`, or `/ide` inside a session) use Helix as its
+editor — review proposed edits, receive LSP diagnostics and see the current
+selection. The server can also be started per launch with `--claude-ide`
+(and `--claude-ide-port`, `--claude-ide-name`) or at runtime with
+`:claude-ide-start`; `:claude-ide-status` and `:claude-ide-stop` inspect and
+stop it.
+
+| Key | Description | Default |
+|---|---|---|
+| `enable` | Start the IDE server when Helix starts. | `false` |
+| `name` | Name shown in the CLI's `/ide` picker. Empty means the workspace directory name. | `""` |
+| `notify-selection` | Send the current selection to the connected CLI (shown as "N lines selected"). | `true` |
+| `diff-mode` | How proposed edits are reviewed: `prompt` (Apply / Cancel dialog with a diff preview) or `split` (side-by-side split, accept with `:claude-diff-accept`). | `prompt` |
+
+Only one CLI can be connected at a time and the CLI does not reconnect on its
+own; the CLI's working directory must be the workspace root or a directory
+below it, otherwise `/ide` does not list the editor.
 
 ### `[editor.smart-tab]` Section
 

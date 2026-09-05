@@ -10,6 +10,7 @@
 //! lock file and the JSON-RPC dispatch, and delegates tool calls to a
 //! [`ToolHandler`] supplied by the embedding application.
 
+pub mod handler;
 pub mod jsonrpc;
 pub mod lockfile;
 pub mod port;
@@ -26,6 +27,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+pub use handler::{EditorHandler, Session};
 pub use lockfile::LockFile;
 pub use server::Dispatcher;
 pub use tools::{Content, NotImplementedHandler, SharedHandler, ToolHandler, ToolResult};

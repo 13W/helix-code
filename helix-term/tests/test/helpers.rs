@@ -410,6 +410,13 @@ impl AppBuilder {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn with_claude_ide(mut self, name: Option<&str>) -> Self {
+        self.args.claude_ide = true;
+        self.args.claude_ide_port = None; // random port from the protocol range
+        self.args.claude_ide_name = name.map(str::to_owned);
+        self
+    }
 
     pub fn build(self) -> anyhow::Result<Application> {
         if let Some(path) = &self.args.working_directory {
