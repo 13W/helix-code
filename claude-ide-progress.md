@@ -4,8 +4,8 @@
 
 | Задача | Статус | Коммит | Заметки |
 |---|---|---|---|
-| T0 · Гигиена зависимостей | готово | (см. git log) | `reqwest` 0.13, `dashmap` 6.2, `similar` 3, патчи lock; `cargo tree -e normal -p helix-term \| grep reqwest` пуст |
-| T1 · Крейт `helix-claude-ide` | — | — | |
+| T0 · Гигиена зависимостей | готово | `be5ec90c2` | `reqwest` 0.13, `dashmap` 6.2, `similar` 3, патчи lock; `cargo tree -e normal -p helix-term \| grep reqwest` пуст |
+| T1 · Крейт `helix-claude-ide` | готово | `3de3b5b9d` | транспорт, lock-файл, JSON-RPC, `initialize`/`ping`/`tools/list`/`tools/call` с заглушкой; 20 юнит + 7 интеграционных тестов (`tests/handshake.rs`); пример `examples/serve.rs`. **Живая проверка с `claude` 2.1.261**: `claude --ide` в каталоге workspace → `initialize` (2025-11-25) → `notifications/initialized` → `ide_connected {pid}` → `tools/list`; `/exit` → close 1000; Ctrl-C серверу удаляет lock. `claude -p` (print-режим) к IDE **не** подключается — проверять только интерактивно. |
 | T2 · Интеграция в helix-term | — | — | |
 | T3 · `getDiagnostics` | — | — | |
 | T4 · `selection_changed` / `at_mentioned` | — | — | |

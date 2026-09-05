@@ -17,9 +17,8 @@ members = [
   "helix-acp-types",
   "helix-mcp",
   "helix-mcp-types",
+  "helix-claude-ide",
   "helix-stdx",
-  "helix-acp",
-  "helix-mcp",
   "xtask",
 ]
 
