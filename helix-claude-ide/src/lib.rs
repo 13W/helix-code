@@ -10,6 +10,7 @@
 //! lock file and the JSON-RPC dispatch, and delegates tool calls to a
 //! [`ToolHandler`] supplied by the embedding application.
 
+pub mod diagnostics;
 pub mod handler;
 pub mod jsonrpc;
 pub mod lockfile;

@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use helix_mcp_types::McpCommand;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::tools::{ToolHandler, ToolResult};
-use crate::{IdeServerHandle, Notifier};
+use crate::tools::{self, ToolHandler, ToolResult};
+use crate::{diagnostics, IdeServerHandle, Notifier};
 
 /// Tool handler wired to the editor.
 pub struct EditorHandler {
@@ -41,12 +41,37 @@ impl EditorHandler {
     pub fn pending_diff_count(&self) -> usize {
         0
     }
+
+    /// `getDiagnostics {uri?}` (PROTO §4.4). The CLI enforces its own
+    /// 500 ms / 2 s budgets, so the editor round-trip is not timed out here.
+    async fn get_diagnostics(&self, arguments: &Value) -> anyhow::Result<ToolResult> {
+        let path = match arguments.get("uri").and_then(Value::as_str) {
+            Some(uri) => Some(diagnostics::uri_to_path(uri)?),
+            None => None,
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.mcp_tx
+            .send(McpCommand::GetDiagnostics {
+                path,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("editor command channel closed"))?;
+        let files = reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("editor did not reply"))?;
+        Ok(ToolResult::text(diagnostics::render(files)))
+    }
 }
 
 #[async_trait]
 impl ToolHandler for EditorHandler {
-    async fn call(&self, name: &str, _arguments: Value) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::error(format!("{name}: not implemented")))
+    async fn call(&self, name: &str, arguments: Value) -> anyhow::Result<ToolResult> {
+        log::debug!("claude-ide: tools/call {name} {arguments}");
+        match name {
+            tools::GET_DIAGNOSTICS => self.get_diagnostics(&arguments).await,
+            _ => Ok(ToolResult::error(format!("{name}: not implemented"))),
+        }
     }
 
     fn on_client_connected(&self, notifier: Notifier) {
