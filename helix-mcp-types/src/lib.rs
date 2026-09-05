@@ -147,6 +147,17 @@ pub struct DiagnosticItem {
     pub code: Option<String>,
 }
 
+/// Outcome of a Claude Code `openDiff` proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffOutcome {
+    /// The user accepted; carries the final contents (may differ from the
+    /// proposal if the user edited it). The CLI writes the file, not Helix.
+    Saved(String),
+    /// Rejected by the user, by `close_tab` / `closeAllDiffTabs`, or because
+    /// the client went away.
+    Rejected,
+}
+
 /// Diagnostics of one file, as returned by `GetDiagnostics`.
 pub struct FileDiagnostics {
     pub path: PathBuf,
@@ -369,6 +380,24 @@ pub enum McpCommand {
         tool_name: String,
         diff: String,
         reply: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    },
+    /// Claude Code `openDiff`: show `new_contents` as a proposal for
+    /// `new_path` (old side is the file on disk, or empty when it does not
+    /// exist) and let the user accept or reject it. `reply` is shared with the
+    /// Claude IDE registry; whoever takes the sender first decides.
+    OpenDiff {
+        old_path: PathBuf,
+        new_path: PathBuf,
+        new_contents: String,
+        tab_name: String,
+        reply: Arc<Mutex<Option<oneshot::Sender<DiffOutcome>>>>,
+    },
+    /// Claude Code closed a diff (`close_tab`, `closeAllDiffTabs`,
+    /// disconnect): dismiss its UI if it is currently displayed. The outcome
+    /// has already been decided by the registry.
+    CloseDiff {
+        tab_name: String,
+        reply: oneshot::Sender<()>,
     },
     /// Get the symbol hierarchy for a file via LSP `textDocument/documentSymbol`.
     GetSymbolsOverview {

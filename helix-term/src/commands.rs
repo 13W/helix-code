@@ -7622,7 +7622,7 @@ fn agent_toggle_panel(cx: &mut Context) {
             // Stash all active permission/confirmation dialogs so they can be restored.
             const PERMISSION_IDS: &[&str] = &[
                 "acp-permission", "mcp-permission", "mcp-write",
-                "mcp-edit", "mcp-rename", "mcp-set-breakpoint",
+                "mcp-edit", "mcp-rename", "mcp-set-breakpoint", "claude-diff",
             ];
             compositor.stashed_permission_dialogs = PERMISSION_IDS
                 .iter()
