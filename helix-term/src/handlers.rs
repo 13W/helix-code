@@ -20,6 +20,7 @@ mod code_action_hint;
 pub mod completion;
 pub mod diagnostics;
 mod document_colors;
+pub mod claude_ide;
 mod document_highlight;
 mod document_links;
 mod prompt;
@@ -64,6 +65,7 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     document_links::register_hooks(&handlers);
     prompt::register_hooks(&handlers);
     workspace_trust::register_hooks(&handlers);
+    claude_ide::register_hooks(&handlers);
     on_type_formatting::register_hooks();
     handlers
 }

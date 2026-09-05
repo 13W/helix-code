@@ -11,20 +11,52 @@ use helix_mcp_types::McpCommand;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::notify::{self, SelectionInfo, SelectionTracker, SendFn};
 use crate::tools::{self, ToolHandler, ToolResult};
 use crate::{diagnostics, IdeServerHandle, Notifier};
 
 /// Tool handler wired to the editor.
 pub struct EditorHandler {
     mcp_tx: mpsc::Sender<McpCommand>,
-    notifier: Mutex<Option<Notifier>>,
+    notifier: Arc<Mutex<Option<Notifier>>>,
+    selection: SelectionTracker,
 }
 
 impl EditorHandler {
+    /// Must be called on a Tokio runtime (spawns the selection task).
     pub fn new(mcp_tx: mpsc::Sender<McpCommand>) -> Self {
+        let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(None));
+        let target = Arc::clone(&notifier);
+        let send: SendFn = Arc::new(move |method: &str, params: Value| {
+            let current = target.lock().unwrap().clone();
+            match current {
+                Some(notifier) => notifier.notify(method, params),
+                None => false,
+            }
+        });
         EditorHandler {
             mcp_tx,
-            notifier: Mutex::new(None),
+            notifier,
+            selection: SelectionTracker::spawn(send),
+        }
+    }
+
+    /// Editor hook entry point: the primary selection changed or another
+    /// document got focus. Debounced and de-duplicated before sending.
+    pub fn selection_changed(&self, info: SelectionInfo) {
+        self.selection.update(info);
+    }
+
+    /// `at_mentioned` (PROTO §6.2): insert `@path[#Lx-y]` into the CLI
+    /// prompt. `lines` are 0-indexed and inclusive. Returns `false` when no
+    /// client is connected.
+    pub fn mention(&self, path: &std::path::Path, lines: Option<(usize, usize)>) -> bool {
+        match self.notifier() {
+            Some(notifier) => notifier.notify(
+                notify::AT_MENTIONED,
+                notify::at_mentioned_params(path, lines),
+            ),
+            None => false,
         }
     }
 
@@ -76,6 +108,8 @@ impl ToolHandler for EditorHandler {
 
     fn on_client_connected(&self, notifier: Notifier) {
         *self.notifier.lock().unwrap() = Some(notifier);
+        // PROTO §3.5: the cached selection is re-sent 500 ms after connecting.
+        self.selection.replay_after(notify::REPLAY_DELAY);
     }
 
     fn on_client_disconnected(&self) {

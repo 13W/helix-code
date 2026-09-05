@@ -3142,6 +3142,41 @@ fn claude_ide_status(
     Ok(())
 }
 
+fn claude_mention(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let session = cx
+        .editor
+        .claude_ide
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
+    if !session.is_connected() {
+        anyhow::bail!("no Claude Code client is connected (run `claude --ide` or `/ide`)");
+    }
+    let (view, doc) = current_ref!(cx.editor);
+    let path = doc
+        .path()
+        .ok_or_else(|| anyhow::anyhow!("current buffer has no file path"))?
+        .to_path_buf();
+    let lines = crate::handlers::claude_ide::selection_info(doc, view.id)
+        .and_then(|info| info.line_span());
+    if !session.handler.mention(&path, lines) {
+        anyhow::bail!("failed to send the mention to Claude Code");
+    }
+    let name = doc.display_name();
+    cx.editor.set_status(match lines {
+        Some((start, end)) if start == end => format!("Mentioned @{name}#L{}", start + 1),
+        Some((start, end)) => format!("Mentioned @{name}#L{}-{}", start + 1, end + 1),
+        None => format!("Mentioned @{name}"),
+    });
+    Ok(())
+}
+
 fn agent_prompt(
     cx: &mut compositor::Context,
     args: Args,
@@ -4526,6 +4561,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Stop the Claude Code IDE server and remove its lock file.",
         fun: claude_ide_stop,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-mention",
+        aliases: &[],
+        doc: "Insert the current file (and selected lines) as an @-mention into the connected Claude Code prompt.",
+        fun: claude_mention,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),

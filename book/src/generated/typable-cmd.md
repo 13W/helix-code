@@ -107,4 +107,5 @@
 | `:agent-whoami`, `:aw` | Show authenticated Claude Code account info via ACP: agent-whoami [agent-name] |
 | `:claude-ide-start` | Start the Claude Code IDE server so `claude --ide` can connect: claude-ide-start [port] |
 | `:claude-ide-stop` | Stop the Claude Code IDE server and remove its lock file. |
+| `:claude-mention` | Insert the current file (and selected lines) as an @-mention into the connected Claude Code prompt. |
 | `:claude-ide-status` | Show the Claude Code IDE server port, lock file, connection state and pending diffs. |
