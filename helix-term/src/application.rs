@@ -360,6 +360,7 @@ impl Application {
     {
         loop {
             if self.editor.should_close() {
+                log::debug!("event loop: editor has no views left, closing");
                 return false;
             }
 
@@ -370,6 +371,7 @@ impl Application {
 
                 Some(signal) = self.signals.next() => {
                     if !self.handle_signals(signal).await {
+                        log::debug!("event loop: closing after signal {signal}");
                         return false;
                     };
                 }
