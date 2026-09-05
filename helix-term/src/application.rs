@@ -81,6 +81,8 @@ pub struct Application {
     theme_mode: Option<theme::Mode>,
 
     mcp_rx: Option<tokio::sync::mpsc::Receiver<helix_mcp::McpCommand>>,
+    /// `tab_name` of the Claude Code diff proposal currently on screen.
+    claude_diff_shown: Option<String>,
 }
 
 
@@ -300,6 +302,7 @@ impl Application {
             lsp_progress: LspProgressMap::new(),
             theme_mode,
             mcp_rx,
+            claude_diff_shown: None,
         };
 
         Ok(app)
@@ -418,6 +421,9 @@ impl Application {
                 } => {
                     if let Some(cmd) = cmd {
                         self.handle_mcp_command(cmd).await;
+                        // Commands may open prompts (permission dialogs, Claude
+                        // Code diff proposals); make them visible right away.
+                        helix_event::request_redraw();
                     }
                 }
             }
@@ -786,6 +792,83 @@ impl Application {
             .to_string()
     }
 
+    /// Diff preview for Claude Code proposals: more generous than the MCP one
+    /// (40 lines / 2000 bytes) since this is the only review surface in prompt mode.
+    fn claude_diff_preview(diff: &str) -> String {
+        const MAX_LINES: usize = 40;
+        const MAX_BYTES: usize = 2000;
+        let total_lines = diff.lines().count();
+        let mut out: String = diff
+            .lines()
+            .take(MAX_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if out.len() > MAX_BYTES {
+            let cut = out
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= MAX_BYTES)
+                .last()
+                .unwrap_or(0);
+            out.truncate(cut);
+            out.push('\u{2026}');
+        } else if total_lines > MAX_LINES {
+            out.push_str(&format!("\n\u{2026} ({} more lines)", total_lines - MAX_LINES));
+        }
+        out
+    }
+
+    /// After the CLI has written an accepted proposal, reload the buffer if it
+    /// is open and unmodified so LSP diagnostics reflect the new contents.
+    fn claude_reload_after_write(path: std::path::PathBuf) {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            crate::job::dispatch_blocking(move |editor, _| {
+                let Some(doc_id) = editor.document_by_path(&path).map(|d| d.id()) else {
+                    return;
+                };
+                let Some(view_id) = editor
+                    .tree
+                    .views()
+                    .find(|(view, _)| view.doc == doc_id)
+                    .map(|(view, _)| view.id)
+                else {
+                    return;
+                };
+                let trust_full = editor
+                    .documents
+                    .get(&doc_id)
+                    .map(|doc| {
+                        editor
+                            .workspace_trust
+                            .query(
+                                doc.workspace_root(),
+                                helix_loader::workspace_trust::TrustQuery::Git,
+                            )
+                            .is_trusted()
+                    })
+                    .unwrap_or(false);
+                let scrolloff = editor.config().scrolloff;
+                let view = editor.tree.get_mut(view_id);
+                let Some(doc) = editor.documents.get_mut(&doc_id) else {
+                    return;
+                };
+                if doc.is_modified() {
+                    return;
+                }
+                if let Err(e) = doc.reload(view, &editor.diff_providers, trust_full) {
+                    log::warn!("claude-ide: reload after write failed: {e}");
+                    return;
+                }
+                view.ensure_cursor_in_view(doc, scrolloff);
+                editor
+                    .language_servers
+                    .file_event_handler
+                    .file_changed(path);
+            });
+        });
+    }
+
     /// Build a truncated diff preview string for MCP approval dialogs.
     fn mcp_diff_preview(diff: &str) -> String {
         let truncated: String = diff.lines().take(20).collect::<Vec<_>>().join("\n");
@@ -995,6 +1078,72 @@ impl Application {
                 .no_auto_close()
                 .with_id("mcp-permission");
                 self.compositor.replace_or_push("mcp-permission", select);
+            }
+
+            // ── Claude Code IDE: diff proposals (prompt mode) ───────────────
+
+            McpCommand::OpenDiff {
+                old_path,
+                new_path,
+                new_contents,
+                tab_name,
+                reply,
+            } => {
+                use crate::ui::PromptEvent;
+                // PROTO §5.1: the left side is the file on disk, or empty for a new file.
+                let old = std::fs::read_to_string(&old_path).unwrap_or_default();
+                let diff = Self::mcp_unified_diff(&old, &new_contents, &new_path);
+                let preview = Self::claude_diff_preview(&diff);
+                let shown_path = helix_stdx::path::get_relative_path(&new_path);
+                let message = if old_path.exists() {
+                    format!(
+                        "Claude Code proposes changes to {}\n\n{preview}",
+                        shown_path.display()
+                    )
+                } else {
+                    format!(
+                        "Claude Code proposes to create {}\n\n{preview}",
+                        shown_path.display()
+                    )
+                };
+                let saved_path = new_path.clone();
+                let select = ui::Select::new(
+                    message,
+                    [ClaudeDiffAction::Apply, ClaudeDiffAction::Reject],
+                    (),
+                    move |_editor, action, event| {
+                        if event == PromptEvent::Update {
+                            return;
+                        }
+                        let accepted = event == PromptEvent::Validate
+                            && matches!(action, ClaudeDiffAction::Apply);
+                        let outcome = if accepted {
+                            helix_mcp::DiffOutcome::Saved(new_contents.clone())
+                        } else {
+                            helix_mcp::DiffOutcome::Rejected
+                        };
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(outcome);
+                            if accepted {
+                                // The CLI writes the file right after FILE_SAVED;
+                                // pick the change up in an open, unmodified buffer.
+                                Self::claude_reload_after_write(saved_path.clone());
+                            }
+                        }
+                    },
+                )
+                .no_auto_close()
+                .with_id(CLAUDE_DIFF_ID);
+                self.compositor.replace_or_push(CLAUDE_DIFF_ID, select);
+                self.claude_diff_shown = Some(tab_name);
+            }
+
+            McpCommand::CloseDiff { tab_name, reply } => {
+                if self.claude_diff_shown.as_deref() == Some(tab_name.as_str()) {
+                    self.compositor.remove(CLAUDE_DIFF_ID);
+                    self.claude_diff_shown = None;
+                }
+                let _ = reply.send(());
             }
 
             McpCommand::WriteFile {
@@ -4799,6 +4948,26 @@ impl ui::menu::Item for QuestionOption {
 enum McpApproveAction {
     Apply,
     Cancel,
+}
+
+/// Compositor id of the Claude Code diff prompt.
+pub const CLAUDE_DIFF_ID: &str = "claude-diff";
+
+/// Choices offered for a Claude Code `openDiff` proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeDiffAction {
+    Apply,
+    Reject,
+}
+
+impl ui::menu::Item for ClaudeDiffAction {
+    type Data = ();
+    fn format(&self, _: &Self::Data) -> tui::widgets::Row<'_> {
+        match self {
+            ClaudeDiffAction::Apply => "Apply".into(),
+            ClaudeDiffAction::Reject => "Reject".into(),
+        }
+    }
 }
 
 impl ui::menu::Item for McpApproveAction {

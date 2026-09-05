@@ -36,10 +36,65 @@ async fn with_loop<T>(
     }
 }
 
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Responses that arrived while waiting for a different id.
+#[derive(Default)]
+struct Inbox(std::collections::HashMap<u64, Value>);
+
+/// Wait for the response to an already-sent request, stashing others.
+async fn rpc_wait(ws: &mut Ws, inbox: &mut Inbox, id: u64) -> anyhow::Result<Value> {
+    if let Some(value) = inbox.0.remove(&id) {
+        return Ok(value);
+    }
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .unwrap()?;
+        if let Message::Text(text) = msg {
+            let value: Value = serde_json::from_str(text.as_str())?;
+            match value.get("id").and_then(Value::as_u64) {
+                Some(got) if got == id => return Ok(value),
+                Some(got) => {
+                    inbox.0.insert(got, value);
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+/// Like `with_loop`, but first feeds `keys` (macro syntax) to the editor.
+async fn with_keys_loop<T>(
+    app: &mut helix_term::application::Application,
+    keys: &str,
+    future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    use crossterm::event::{Event, KeyEvent};
+    use helix_view::input::parse_macro;
+    #[cfg(not(windows))]
+    use termina::event::{Event, KeyEvent};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut rx_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+    for key in parse_macro(keys)? {
+        tx.send(Ok(Event::Key(KeyEvent::from(key))))?;
+    }
+    tokio::select! {
+        result = future => result,
+        _ = async {
+            loop {
+                app.event_loop_until_idle(&mut rx_stream).await;
+                tokio::task::yield_now().await;
+            }
+        } => unreachable!(),
+    }
+}
+
 async fn rpc(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    ws: &mut Ws,
+    inbox: &mut Inbox,
     id: u64,
     method: &str,
     params: Value,
@@ -50,17 +105,7 @@ async fn rpc(
             .into(),
     ))
     .await?;
-    loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await?
-            .unwrap()?;
-        if let Message::Text(text) = msg {
-            let value: Value = serde_json::from_str(text.as_str())?;
-            if value.get("id") == Some(&json!(id)) {
-                return Ok(value);
-            }
-        }
-    }
+    rpc_wait(ws, inbox, id).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -102,6 +147,7 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
         .with_sub_protocol("mcp")
         .with_header("X-Claude-Code-Ide-Authorization", token);
     let (mut ws, response) = tokio_tungstenite::connect_async(request).await?;
+    let mut inbox = Inbox::default();
     assert_eq!(
         response.headers().get("sec-websocket-protocol").unwrap(),
         "mcp"
@@ -135,6 +181,7 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
         &mut app,
         rpc(
             &mut ws,
+            &mut inbox,
             1,
             "tools/call",
             json!({"name": "getDiagnostics", "arguments": {"uri": uri}}),
@@ -155,6 +202,7 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
         &mut app,
         rpc(
             &mut ws,
+            &mut inbox,
             2,
             "tools/call",
             json!({"name": "getDiagnostics", "arguments": {}}),
@@ -196,6 +244,84 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
         json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 12}, "isEmpty": false})
     );
     assert!(note.get("id").is_none(), "notifications carry no id");
+
+    // openDiff (prompt mode): the proposal blocks until decided; Enter on the
+    // first option (Apply) answers FILE_SAVED with the proposed contents and
+    // Helix leaves the file alone (the CLI writes it).
+    let before = std::fs::read_to_string(&file_path)?;
+    let tab = "\u{273B} [Claude Code] test.rs (abc123) \u{29C9}";
+    let proposal = "fn main() {}\nfn helper() {}\nfn added() {}\n";
+    ws.send(Message::Text(
+        json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"openDiff","arguments":{
+            "old_file_path": file_path.to_string_lossy(),
+            "new_file_path": file_path.to_string_lossy(),
+            "new_file_contents": proposal,
+            "tab_name": tab,
+        }}})
+        .to_string()
+        .into(),
+    ))
+    .await?;
+    // Let the editor receive the command and show the prompt.
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    })
+    .await?;
+    assert_eq!(session.handler.pending_diff_count(), 1);
+    assert!(session.handler.pending_diffs()[0].shown);
+    // Nothing answered yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), ws.next())
+            .await
+            .is_err(),
+        "openDiff must not resolve before the user decides"
+    );
+    // Press Enter: the Select's default option is Apply.
+    let reply = with_keys_loop(&mut app, "<ret>", rpc_wait(&mut ws, &mut inbox, 10)).await?;
+    let content = reply["result"]["content"].as_array().unwrap();
+    assert_eq!(content[0]["text"], "FILE_SAVED");
+    assert_eq!(content[1]["text"], proposal);
+    assert_eq!(
+        std::fs::read_to_string(&file_path)?,
+        before,
+        "Helix must not write the file"
+    );
+    assert_eq!(session.handler.pending_diff_count(), 0);
+
+    // close_tab on a pending proposal rejects it.
+    ws.send(Message::Text(
+        json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"openDiff","arguments":{
+            "old_file_path": file_path.to_string_lossy(),
+            "new_file_path": file_path.to_string_lossy(),
+            "new_file_contents": "other\n",
+            "tab_name": "second",
+        }}})
+        .to_string()
+        .into(),
+    ))
+    .await?;
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    })
+    .await?;
+    let closed = with_loop(
+        &mut app,
+        rpc(
+            &mut ws,
+            &mut inbox,
+            12,
+            "tools/call",
+            json!({"name": "close_tab", "arguments": {"tab_name": "second"}}),
+        ),
+    )
+    .await?;
+    assert_eq!(closed["result"]["content"][0]["text"], "TAB_CLOSED");
+    let rejected = with_loop(&mut app, rpc_wait(&mut ws, &mut inbox, 11)).await?;
+    assert_eq!(rejected["result"]["content"][0]["text"], "DIFF_REJECTED");
+    assert_eq!(rejected["result"]["content"][1]["text"], "second");
+    assert_eq!(session.handler.pending_diff_count(), 0);
 
     // Closing the editor stops the server and removes the lock file.
     let errs = app.close().await;

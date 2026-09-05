@@ -11,6 +11,7 @@
 //! [`ToolHandler`] supplied by the embedding application.
 
 pub mod diagnostics;
+pub mod diff;
 pub mod handler;
 pub mod jsonrpc;
 pub mod lockfile;
