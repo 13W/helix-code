@@ -51,6 +51,7 @@ helix-vcs = { path = "../helix-vcs" }
 helix-loader = { path = "../helix-loader" }
 helix-acp = { path = "../helix-acp" }
 helix-mcp = { path = "../helix-mcp" }
+helix-claude-ide = { path = "../helix-claude-ide" }
 
 anyhow = "1"
 once_cell = "1.21"
@@ -108,3 +109,4 @@ indoc = "2.0.6"
 tempfile.workspace = true
 same-file = "1.0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tokio-tungstenite = "0.29"

@@ -158,6 +158,7 @@
 | `goto_last_change` | Goto last change | normal: `` ]G ``, select: `` ]G `` |
 | `show_diff_base` | Show original hunk text at cursor (VCS diff base) | normal: `` <space>K ``, select: `` <space>K `` |
 | `show_diff_view` | Open side-by-side diff view of the entire file | normal: `` <space>V ``, select: `` <space>V `` |
+| `markdown_preview` | Preview the current document rendered as markdown | normal: `` <space>m ``, select: `` <space>m `` |
 | `goto_line_start` | Goto line start | normal: `` gh ``, `` <home> ``, select: `` gh ``, insert: `` <home> `` |
 | `goto_line_end` | Goto line end | normal: `` gl ``, `` <end> ``, select: `` gl `` |
 | `goto_column` | Goto column | normal: `` g\| `` |

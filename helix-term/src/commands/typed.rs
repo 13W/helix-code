@@ -3076,6 +3076,72 @@ fn agent_cancel(
     Ok(())
 }
 
+fn claude_ide_start(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let port = match args.first() {
+        Some(port) => Some(
+            port.parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("port must be a number between 0 and 65535"))?,
+        ),
+        None => None,
+    };
+    let session = crate::claude_ide::start(cx.editor, port, None)?;
+    let message = format!(
+        "Claude IDE server listening on 127.0.0.1:{} (lock file {})",
+        session.port(),
+        session.handle.lock_path().display()
+    );
+    cx.editor.set_status(message);
+    Ok(())
+}
+
+fn claude_ide_stop(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let session = crate::claude_ide::stop(cx.editor)
+        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
+    tokio::spawn(crate::claude_ide::stop_session(session));
+    cx.editor.set_status("Claude IDE server stopped");
+    Ok(())
+}
+
+fn claude_ide_status(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let message = match &cx.editor.claude_ide {
+        Some(session) => format!(
+            "Claude IDE: ws://127.0.0.1:{} · lock {} · client {} · pending diffs {}",
+            session.port(),
+            session.handle.lock_path().display(),
+            if session.is_connected() {
+                "connected"
+            } else {
+                "none"
+            },
+            session.handler.pending_diff_count()
+        ),
+        None => "Claude IDE server is not running (start with :claude-ide-start)".to_string(),
+    };
+    cx.editor.set_status(message);
+    Ok(())
+}
+
 fn agent_prompt(
     cx: &mut compositor::Context,
     args: Args,
@@ -4443,7 +4509,40 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
             positionals: (0, Some(1)),
             ..Signature::DEFAULT
         },
-    }
+    },
+    TypableCommand {
+        name: "claude-ide-start",
+        aliases: &[],
+        doc: "Start the Claude Code IDE server so `claude --ide` can connect: claude-ide-start [port]",
+        fun: claude_ide_start,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-ide-stop",
+        aliases: &[],
+        doc: "Stop the Claude Code IDE server and remove its lock file.",
+        fun: claude_ide_stop,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-ide-status",
+        aliases: &[],
+        doc: "Show the Claude Code IDE server port, lock file, connection state and pending diffs.",
+        fun: claude_ide_status,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
 ];
 
 pub static TYPABLE_COMMAND_MAP: Lazy<HashMap<&'static str, &'static TypableCommand>> =

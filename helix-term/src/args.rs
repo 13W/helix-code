@@ -23,6 +23,9 @@ pub struct Args {
     pub mcp: bool,
     pub mcp_port: Option<u16>,
     pub mcp_auto_approve: bool,
+    pub claude_ide: bool,
+    pub claude_ide_port: Option<u16>,
+    pub claude_ide_name: Option<String>,
 }
 
 impl Args {
@@ -108,6 +111,26 @@ impl Args {
                 "--mcp-auto-approve" => {
                     args.mcp_auto_approve = true;
                 }
+                "--claude-ide" => args.claude_ide = true,
+                "--claude-ide-port" => match argv.next().as_deref() {
+                    Some(port) => match port.parse::<u16>() {
+                        Ok(p) => {
+                            args.claude_ide = true;
+                            args.claude_ide_port = Some(p);
+                        }
+                        Err(_) => {
+                            anyhow::bail!("--claude-ide-port must be a valid port number (0-65535)")
+                        }
+                    },
+                    None => anyhow::bail!("--claude-ide-port must specify a port number"),
+                },
+                "--claude-ide-name" => match argv.next() {
+                    Some(name) if !name.trim().is_empty() => {
+                        args.claude_ide = true;
+                        args.claude_ide_name = Some(name);
+                    }
+                    _ => anyhow::bail!("--claude-ide-name must specify a name"),
+                },
                 arg if arg.starts_with("--") => {
                     anyhow::bail!("unexpected double dash argument: {}", arg)
                 }

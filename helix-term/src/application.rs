@@ -272,6 +272,24 @@ impl Application {
         }
         }
 
+        // Start the Claude Code IDE server when requested by flag or config.
+        if args.claude_ide || editor.config().claude_ide.enable {
+            match crate::claude_ide::start(
+                &mut editor,
+                args.claude_ide_port,
+                args.claude_ide_name.as_deref(),
+            ) {
+                Ok(session) => {
+                    eprintln!(
+                        "helix-claude-ide: IDE server listening at ws://127.0.0.1:{} (lock file {})",
+                        session.port(),
+                        session.handle.lock_path().display()
+                    );
+                }
+                Err(e) => log::warn!("helix-claude-ide: failed to start IDE server: {e}"),
+            }
+        }
+
         let app = Self {
             compositor,
             terminal,
@@ -579,6 +597,7 @@ impl Application {
                     let err = std::io::Error::last_os_error();
                     eprintln!("{}", err);
                     let res = err.raw_os_error().unwrap_or(1);
+                    crate::claude_ide::remove_lock_file_now();
                     std::process::exit(res);
                 }
             }
@@ -4702,6 +4721,10 @@ for (agent_id, reply, allow_always_id) in pending {
         }
 
         self.editor.close_language_servers(None).await;
+
+        if let Some(session) = crate::claude_ide::stop(&mut self.editor) {
+            crate::claude_ide::stop_session(session).await;
+        }
 
         errs
     }

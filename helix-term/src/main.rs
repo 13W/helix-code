@@ -61,9 +61,15 @@ FLAGS:
     --vsplit                       Split all given files vertically into different windows
     --hsplit                       Split all given files horizontally into different windows
     -w, --working-dir <path>       Specify an initial working directory
+    --mcp                          Start the embedded MCP server (HTTP, 127.0.0.1)
     --mcp-port <PORT>              Bind the MCP server to a specific port (implies --mcp)
     --mcp-auto-approve             Auto-approve all MCP write operations (skip y/N prompts)
-    --mcp-port <PORT>              Bind the MCP server to a specific port (implies --mcp)
+    --claude-ide                   Start the Claude Code IDE server so `claude --ide` / `/ide`
+                                   can connect to this Helix instance
+    --claude-ide-port <PORT>       Bind the Claude Code IDE server to a specific port
+                                   (implies --claude-ide)
+    --claude-ide-name <NAME>       Name shown in Claude Code's /ide picker (implies --claude-ide;
+                                   defaults to the workspace directory name)
     +[N]                           Open the first given file at line number N, or the last line, if
                                    N is not specified.
 ",

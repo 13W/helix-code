@@ -1929,6 +1929,7 @@ dependencies = [
  "axum",
  "etcetera",
  "futures-util",
+ "helix-mcp-types",
  "log",
  "serde",
  "serde_json",
@@ -2141,6 +2142,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "helix-acp",
+ "helix-claude-ide",
  "helix-core",
  "helix-dap",
  "helix-event",
@@ -2175,6 +2177,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "toml",
 ]
 
@@ -2225,6 +2228,7 @@ dependencies = [
  "foldhash 0.2.0",
  "futures-util",
  "helix-acp",
+ "helix-claude-ide",
  "helix-core",
  "helix-dap",
  "helix-event",
