@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{anyhow, bail};
 use arc_swap::ArcSwapOption;
 use helix_claude_ide::{EditorHandler, Session, SharedHandler};
-use helix_view::Editor;
+use helix_mcp::DiffOutcome;
+use helix_view::editor::ClaudeDiffView;
+use helix_view::{DocumentId, Editor};
 
 /// Lock file of the running server, for the panic hook and `process::exit` paths.
 static LOCK_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -110,4 +112,60 @@ fn install_panic_hook() {
             previous(info);
         }));
     });
+}
+
+// ── split proposals (`diff-mode = "split"`) ──────────────────────────────────
+
+/// Proposal shown as a split that owns `doc_id` (left or right side).
+pub fn split_for_doc(editor: &Editor, doc_id: DocumentId) -> Option<ClaudeDiffView> {
+    editor.claude_diff_view_for_doc(doc_id).cloned()
+}
+
+/// The proposal a bare `:claude-diff-accept` / `:claude-diff-reject` refers
+/// to: the one owning the current document, else the only pending one.
+pub fn current_split(editor: &Editor) -> anyhow::Result<ClaudeDiffView> {
+    let current = editor.tree.get(editor.tree.focus).doc;
+    if let Some(view) = split_for_doc(editor, current) {
+        return Ok(view);
+    }
+    match editor.claude_diff_views.as_slice() {
+        [] => bail!("no Claude Code proposal is open"),
+        [only] => Ok(only.clone()),
+        _ => bail!("several Claude Code proposals are open; focus one of them first"),
+    }
+}
+
+/// Decide a split proposal (PROTO §5.3): resolve the CLI call, tear the
+/// split down and, when accepted, reload the target buffer once the CLI has
+/// written the file. Returns `false` if no such proposal exists.
+pub fn resolve_split(editor: &mut Editor, tab_name: &str, outcome: DiffOutcome) -> bool {
+    let Some(view) = editor.claude_diff_view_for_tab(tab_name).cloned() else {
+        return false;
+    };
+    let accepted = matches!(outcome, DiffOutcome::Saved(_));
+    if let Some(tx) = view.reply.lock().unwrap().take() {
+        let _ = tx.send(outcome);
+    }
+    crate::application::Application::claude_close_diff_split(editor, tab_name);
+    if accepted {
+        crate::application::Application::claude_reload_after_write(view.path.clone());
+    }
+    true
+}
+
+/// Accept a split proposal with the *current* contents of the proposal
+/// buffer (the user may have edited it) — `FILE_SAVED` + text; Helix does not
+/// write the file (PROTO §5.2).
+pub fn accept_split(editor: &mut Editor, view: &ClaudeDiffView) -> anyhow::Result<()> {
+    let text = editor
+        .documents
+        .get(&view.right)
+        .map(|doc| doc.text().to_string())
+        .ok_or_else(|| anyhow!("the proposal buffer is gone"))?;
+    resolve_split(editor, &view.tab_name, DiffOutcome::Saved(text));
+    Ok(())
+}
+
+pub fn reject_split(editor: &mut Editor, view: &ClaudeDiffView) {
+    resolve_split(editor, &view.tab_name, DiffOutcome::Rejected);
 }

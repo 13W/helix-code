@@ -481,7 +481,7 @@ range, e.g. `@src/main.rs#L10-15`) into the connected CLI's prompt.
 | `enable` | Start the IDE server when Helix starts. | `false` |
 | `name` | Name shown in the CLI's `/ide` picker. Empty means the workspace directory name. | `""` |
 | `notify-selection` | Send the current selection to the connected CLI (shown as "N lines selected"). | `true` |
-| `diff-mode` | How proposed edits are reviewed: `prompt` (Apply / Cancel dialog with a diff preview) or `split` (side-by-side split, accept with `:claude-diff-accept`). | `prompt` |
+| `diff-mode` | How proposed edits are reviewed: `prompt` (Apply / Reject dialog with a diff preview) or `split` (the file on the left, the editable proposal `✻ <file>` on the right; `:claude-diff-accept` / `:w` in the proposal buffer accept it with its current contents, `:claude-diff-reject` / `:bc` reject it, `:q` only closes a window and keeps the proposal pending). Helix never writes the file itself: the CLI does after an accepted proposal. | `prompt` |
 
 Only one CLI can be connected at a time and the CLI does not reconnect on its
 own; the CLI's working directory must be the workspace root or a directory

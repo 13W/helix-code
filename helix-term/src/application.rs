@@ -960,7 +960,7 @@ impl Application {
 
     /// After the CLI has written an accepted proposal, reload the buffer if it
     /// is open and unmodified so LSP diagnostics reflect the new contents.
-    fn claude_reload_after_write(path: std::path::PathBuf) {
+    pub fn claude_reload_after_write(path: std::path::PathBuf) {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             crate::job::dispatch_blocking(move |editor, _| {
