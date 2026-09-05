@@ -588,6 +588,40 @@ pub enum ClaudeIdeDiffMode {
     Split,
 }
 
+/// A Claude Code `openDiff` proposal displayed as a vertical split: the
+/// current file (or an empty scratch buffer for a new file) on the left and
+/// the proposal on the right. Accepting or rejecting resolves `reply`.
+#[derive(Clone)]
+pub struct ClaudeDiffView {
+    /// `tab_name` given by the CLI, used by `close_tab`.
+    pub tab_name: String,
+    /// The file the proposal targets.
+    pub path: PathBuf,
+    /// Left side: the real document, or a scratch buffer when the file does not exist yet.
+    pub left: DocumentId,
+    pub left_is_scratch: bool,
+    pub left_was_readonly: bool,
+    /// Diff base the left document had before the proposal overrode it.
+    pub left_previous_base: Option<String>,
+    /// Right side: scratch buffer holding the proposal (editable).
+    pub right: DocumentId,
+    /// Views created for the proposal; closed on teardown if still open.
+    pub views: Vec<ViewId>,
+    /// Shared decision slot (see `helix_claude_ide::diff`).
+    pub reply: helix_claude_ide::diff::Reply,
+}
+
+impl std::fmt::Debug for ClaudeDiffView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeDiffView")
+            .field("tab_name", &self.tab_name)
+            .field("path", &self.path)
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .finish()
+    }
+}
+
 /// `[editor.claude-ide]`: the Claude Code IDE integration server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
@@ -1324,6 +1358,8 @@ pub struct Editor {
     pub mcp_trace: bool,
     /// Running Claude Code IDE server (`--claude-ide` / `:claude-ide-start`).
     pub claude_ide: Option<helix_claude_ide::Session>,
+    /// Claude Code proposals currently shown as splits (`diff-mode = "split"`).
+    pub claude_diff_views: Vec<ClaudeDiffView>,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
 
     pub syn_loader: Arc<ArcSwap<syntax::Loader>>,
@@ -1480,6 +1516,7 @@ impl Editor {
             mcp_addr: None,
             mcp_trace: false,
             claude_ide: None,
+            claude_diff_views: Vec::new(),
             breakpoints: HashMap::new(),
             syn_loader,
             theme_loader,
@@ -2100,7 +2137,7 @@ impl Editor {
         id
     }
 
-    fn new_file_from_document(&mut self, action: Action, doc: Document) -> DocumentId {
+    pub fn new_file_from_document(&mut self, action: Action, doc: Document) -> DocumentId {
         let id = self.new_document(doc);
         self.switch(id, action);
         id
@@ -2191,6 +2228,18 @@ impl Editor {
         }
         self.tree.remove(id);
         self._refresh();
+    }
+
+    /// Claude Code split proposal that owns `doc_id` (left or right side).
+    pub fn claude_diff_view_for_doc(&self, doc_id: DocumentId) -> Option<&ClaudeDiffView> {
+        self.claude_diff_views
+            .iter()
+            .find(|v| v.right == doc_id || v.left == doc_id)
+    }
+
+    /// Claude Code split proposal shown for `tab_name`.
+    pub fn claude_diff_view_for_tab(&self, tab_name: &str) -> Option<&ClaudeDiffView> {
+        self.claude_diff_views.iter().find(|v| v.tab_name == tab_name)
     }
 
     pub fn close_document(&mut self, doc_id: DocumentId, force: bool) -> Result<(), CloseError> {

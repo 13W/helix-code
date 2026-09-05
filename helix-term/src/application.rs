@@ -792,6 +792,146 @@ impl Application {
             .to_string()
     }
 
+    /// `diff-mode = "split"`: show the proposal as a vertical split — the
+    /// current file (read-only while the proposal is open, gutter marking what
+    /// the proposal changes) on the left and an editable scratch buffer with
+    /// the proposed contents on the right. Decided later by
+    /// `:claude-diff-accept` / `:claude-diff-reject`, `:w` on the right buffer,
+    /// closing the right buffer, or `close_tab` from the CLI.
+    fn claude_open_diff_split(
+        &mut self,
+        old_path: std::path::PathBuf,
+        new_path: std::path::PathBuf,
+        new_contents: String,
+        tab_name: String,
+        reply: helix_claude_ide::diff::Reply,
+    ) {
+        use helix_view::editor::{Action, ClaudeDiffView};
+        let editor = &mut self.editor;
+        let reject = |reply: &helix_claude_ide::diff::Reply| {
+            if let Some(tx) = reply.lock().unwrap().take() {
+                let _ = tx.send(helix_mcp::DiffOutcome::Rejected);
+            }
+        };
+        if editor.claude_diff_view_for_tab(&tab_name).is_some() {
+            Self::claude_close_diff_split(editor, &tab_name);
+        }
+
+        let old = std::fs::read_to_string(&old_path).unwrap_or_default();
+        let (left, left_is_scratch) = if old_path.exists() {
+            match editor.open(&old_path, Action::VerticalSplit) {
+                Ok(id) => (id, false),
+                Err(e) => {
+                    log::warn!("claude-ide: cannot open {}: {e}", old_path.display());
+                    editor.set_error(format!(
+                        "Claude Code proposal: cannot open {}: {e}",
+                        old_path.display()
+                    ));
+                    reject(&reply);
+                    return;
+                }
+            }
+        } else {
+            let doc = helix_view::Document::from(
+                helix_core::Rope::new(),
+                None,
+                editor.config.clone(),
+                editor.syn_loader.clone(),
+            );
+            (editor.new_file_from_document(Action::VerticalSplit, doc), true)
+        };
+        let left_view = editor.tree.focus;
+        let (left_was_readonly, left_previous_base) = {
+            let doc = doc_mut!(editor, &left);
+            let previous = doc
+                .diff_handle()
+                .map(|h| h.load().diff_base().to_string());
+            let was_readonly = doc.readonly;
+            doc.readonly = true;
+            doc.set_diff_base(new_contents.as_bytes().to_vec());
+            (was_readonly, previous)
+        };
+
+        // Right side: the proposal, named after the target file so syntax
+        // highlighting and the buffer name make sense, but never written to
+        // that path (the CLI writes the real file after FILE_SAVED).
+        let mut right_doc = helix_view::Document::from(
+            helix_core::Rope::from(new_contents.as_str()),
+            None,
+            editor.config.clone(),
+            editor.syn_loader.clone(),
+        );
+        right_doc.set_path(Some(&Self::claude_proposal_path(&new_path)));
+        right_doc.detect_language(&editor.syn_loader.load());
+        let right = editor.new_file_from_document(Action::VerticalSplit, right_doc);
+        let right_view = editor.tree.focus;
+        doc_mut!(editor, &right).set_diff_base(old.into_bytes());
+
+        editor.claude_diff_views.push(ClaudeDiffView {
+            tab_name,
+            path: new_path.clone(),
+            left,
+            left_is_scratch,
+            left_was_readonly,
+            left_previous_base,
+            right,
+            views: vec![left_view, right_view],
+            reply,
+        });
+        editor.set_status(format!(
+            "Claude Code proposal for {}: :claude-diff-accept / :claude-diff-reject (or :w / :bc on the right buffer)",
+            helix_stdx::path::get_relative_path(&new_path).display()
+        ));
+    }
+
+    /// Path shown for the right-hand proposal buffer: `<dir>/✻ <file>` keeps
+    /// the extension (syntax highlighting) and cannot collide with the real file.
+    pub fn claude_proposal_path(path: &std::path::Path) -> std::path::PathBuf {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "proposal".to_string());
+        path.with_file_name(format!("\u{273B} {name}"))
+    }
+
+    /// Tear down a split proposal: restore the left document, close the
+    /// proposal buffer and the views the proposal opened. Does not decide the
+    /// outcome — callers resolve `reply` first.
+    pub fn claude_close_diff_split(editor: &mut helix_view::Editor, tab_name: &str) {
+        let Some(idx) = editor
+            .claude_diff_views
+            .iter()
+            .position(|v| v.tab_name == tab_name)
+        else {
+            return;
+        };
+        let view = editor.claude_diff_views.remove(idx);
+        if let Some(doc) = editor.documents.get_mut(&view.left) {
+            doc.readonly = view.left_was_readonly;
+            match &view.left_previous_base {
+                Some(base) => doc.set_diff_base(base.as_bytes().to_vec()),
+                None => doc.clear_diff_base(),
+            }
+        }
+        if editor.documents.contains_key(&view.right) {
+            let _ = editor.close_document(view.right, true);
+        }
+        if view.left_is_scratch && editor.documents.contains_key(&view.left) {
+            let _ = editor.close_document(view.left, true);
+        } else {
+            // Close the window we opened for the left side, but never the last one.
+            for view_id in &view.views {
+                let still_open = editor.tree.contains(*view_id);
+                if still_open
+                    && editor.tree.get(*view_id).doc == view.left
+                    && editor.tree.views().count() > 1
+                {
+                    editor.close(*view_id);
+                }
+            }
+        }
+    }
+
     /// Diff preview for Claude Code proposals: more generous than the MCP one
     /// (40 lines / 2000 bytes) since this is the only review surface in prompt mode.
     fn claude_diff_preview(diff: &str) -> String {
@@ -1090,6 +1230,12 @@ impl Application {
                 reply,
             } => {
                 use crate::ui::PromptEvent;
+                if self.editor.config().claude_ide.diff_mode
+                    == helix_view::editor::ClaudeIdeDiffMode::Split
+                {
+                    self.claude_open_diff_split(old_path, new_path, new_contents, tab_name, reply);
+                    return;
+                }
                 // PROTO §5.1: the left side is the file on disk, or empty for a new file.
                 let old = std::fs::read_to_string(&old_path).unwrap_or_default();
                 let diff = Self::mcp_unified_diff(&old, &new_contents, &new_path);
@@ -1142,6 +1288,9 @@ impl Application {
                 if self.claude_diff_shown.as_deref() == Some(tab_name.as_str()) {
                     self.compositor.remove(CLAUDE_DIFF_ID);
                     self.claude_diff_shown = None;
+                }
+                if self.editor.claude_diff_view_for_tab(&tab_name).is_some() {
+                    Self::claude_close_diff_split(&mut self.editor, &tab_name);
                 }
                 let _ = reply.send(());
             }

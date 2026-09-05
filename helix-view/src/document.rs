@@ -2036,6 +2036,11 @@ impl Document {
     }
 
     /// Intialize/updates the differ for this document with a new base.
+    /// Drop the diff base (and gutter markers) entirely.
+    pub fn clear_diff_base(&mut self) {
+        self.diff_handle = None;
+    }
+
     pub fn set_diff_base(&mut self, diff_base: Vec<u8>) {
         if let Ok((diff_base, ..)) = from_reader(&mut diff_base.as_slice(), Some(self.encoding)) {
             if let Some(differ) = &self.diff_handle {
