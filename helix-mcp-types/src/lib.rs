@@ -126,16 +126,33 @@ pub struct ViewportInfo {
 // ---------------------------------------------------------------------------
 
 /// A diagnostic item returned by `get_diagnostics`.
+///
+/// Positions are the raw LSP positions: 0-indexed line and 0-indexed
+/// character offset within the line (UTF-16 code units for LSP servers
+/// using the default encoding).
 pub struct DiagnosticItem {
     pub path: PathBuf,
-    /// 0-indexed line number.
+    /// 0-indexed start line.
     pub line: usize,
-    /// 0-indexed column number.
+    /// 0-indexed start character.
     pub col: usize,
+    /// 0-indexed end line.
+    pub end_line: usize,
+    /// 0-indexed end character.
+    pub end_col: usize,
+    /// `"error"`, `"warning"`, `"info"` or `"hint"`.
     pub severity: String,
     pub message: String,
     pub source: Option<String>,
     pub code: Option<String>,
+}
+
+/// Diagnostics of one file, as returned by `GetDiagnostics`.
+pub struct FileDiagnostics {
+    pub path: PathBuf,
+    /// Line count of the document if it is open in the editor.
+    pub lines_in_file: Option<usize>,
+    pub items: Vec<DiagnosticItem>,
 }
 
 /// A code action item returned by `code_actions`.
@@ -397,10 +414,12 @@ pub enum McpCommand {
         path: PathBuf,
         reply: oneshot::Sender<anyhow::Result<ViewportInfo>>,
     },
-    /// Get diagnostics. `path = None` returns all workspace diagnostics.
+    /// Get diagnostics grouped by file. `path = None` returns every file the
+    /// editor has diagnostics for (open or not) plus every open document;
+    /// `path = Some(..)` returns exactly one entry, even without diagnostics.
     GetDiagnostics {
         path: Option<PathBuf>,
-        reply: oneshot::Sender<Vec<DiagnosticItem>>,
+        reply: oneshot::Sender<Vec<FileDiagnostics>>,
     },
     /// Get hover documentation for the symbol at (line, col).
     Hover {

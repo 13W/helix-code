@@ -17,7 +17,51 @@ use tokio_tungstenite::tungstenite::Message;
 mod test {
     pub mod helpers;
 }
-use test::helpers::AppBuilder;
+use test::helpers::{run_event_loop_until_idle, AppBuilder};
+
+/// Drive `future` while pumping the editor event loop, so `McpCommand`s sent
+/// by the IDE server are handled by the `Application`.
+async fn with_loop<T>(
+    app: &mut helix_term::application::Application,
+    future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::select! {
+        result = future => result,
+        _ = async {
+            loop {
+                run_event_loop_until_idle(app).await;
+                tokio::task::yield_now().await;
+            }
+        } => unreachable!(),
+    }
+}
+
+async fn rpc(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> anyhow::Result<Value> {
+    ws.send(Message::Text(
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+            .to_string()
+            .into(),
+    ))
+    .await?;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .unwrap()?;
+        if let Message::Text(text) = msg {
+            let value: Value = serde_json::from_str(text.as_str())?;
+            if value.get("id") == Some(&json!(id)) {
+                return Ok(value);
+            }
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
@@ -25,8 +69,13 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
     let config_dir = tempfile::tempdir()?;
     std::env::set_var("CLAUDE_CONFIG_DIR", config_dir.path());
 
+    let file = tempfile::NamedTempFile::new()?;
+    std::fs::write(file.path(), "fn main() {}\nfn helper() {}\n")?;
+    let file_path = std::fs::canonicalize(file.path())?;
+
     let mut app = AppBuilder::new()
         .with_claude_ide(Some("Helix-integration"))
+        .with_file(file_path.clone(), None)
         .build()?;
 
     let session = app
@@ -78,6 +127,43 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(session.is_connected());
+
+    // getDiagnostics for an open file without diagnostics: exactly one entry,
+    // echoing the URI, with the line count and an empty list (PROTO §4.4).
+    let uri = format!("file://{}", file_path.display());
+    let reply = with_loop(
+        &mut app,
+        rpc(
+            &mut ws,
+            1,
+            "tools/call",
+            json!({"name": "getDiagnostics", "arguments": {"uri": uri}}),
+        ),
+    )
+    .await?;
+    assert!(reply.get("error").is_none(), "unexpected error: {reply}");
+    assert_ne!(reply["result"]["isError"], true, "tool error: {reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let files: Value = serde_json::from_str(text)?;
+    assert_eq!(files.as_array().map(Vec::len), Some(1));
+    assert_eq!(files[0]["uri"], uri);
+    assert_eq!(files[0]["linesInFile"], 3);
+    assert_eq!(files[0]["diagnostics"], json!([]));
+
+    // Without `uri`: every open document is listed.
+    let reply = with_loop(
+        &mut app,
+        rpc(
+            &mut ws,
+            2,
+            "tools/call",
+            json!({"name": "getDiagnostics", "arguments": {}}),
+        ),
+    )
+    .await?;
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let files: Value = serde_json::from_str(text)?;
+    assert!(files.as_array().unwrap().iter().any(|f| f["uri"] == uri));
 
     // Closing the editor stops the server and removes the lock file.
     let errs = app.close().await;

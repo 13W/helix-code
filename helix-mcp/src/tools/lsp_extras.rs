@@ -23,6 +23,8 @@ pub struct DiagnosticItemJson {
     pub path: String,
     pub line: usize,
     pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
     pub severity: String,
     pub message: String,
     pub source: Option<String>,
@@ -37,14 +39,17 @@ pub async fn handle_get_diagnostics(
     let path = params.path.map(PathBuf::from);
     tx.send(McpCommand::GetDiagnostics { path, reply: reply_tx }).await
         .map_err(|_| anyhow::anyhow!("editor channel closed"))?;
-    let items = editor_reply(reply_rx).await?;
+    let files = editor_reply(reply_rx).await?;
 
-    let json_items: Vec<DiagnosticItemJson> = items
+    let json_items: Vec<DiagnosticItemJson> = files
         .into_iter()
+        .flat_map(|f| f.items)
         .map(|d| DiagnosticItemJson {
             path: d.path.to_string_lossy().into_owned(),
             line: d.line,
             col: d.col,
+            end_line: d.end_line,
+            end_col: d.end_col,
             severity: d.severity,
             message: d.message,
             source: d.source,

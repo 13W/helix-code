@@ -804,6 +804,54 @@ impl Application {
     }
 
 
+    /// Diagnostics of one file from the editor-wide LSP store (`editor.diagnostics`),
+    /// with the document's line count when the file is open.
+    fn mcp_file_diagnostics(
+        editor: &helix_view::Editor,
+        path: std::path::PathBuf,
+    ) -> helix_mcp::FileDiagnostics {
+        use helix_lsp::lsp::{DiagnosticSeverity, NumberOrString};
+        let path = helix_stdx::path::canonicalize(&path);
+        let uri = helix_core::Uri::from(path.clone());
+        let items = editor
+            .diagnostics
+            .get(&uri)
+            .map(|diags| {
+                diags
+                    .iter()
+                    .map(|(d, _provider)| helix_mcp::DiagnosticItem {
+                        path: path.clone(),
+                        line: d.range.start.line as usize,
+                        col: d.range.start.character as usize,
+                        end_line: d.range.end.line as usize,
+                        end_col: d.range.end.character as usize,
+                        severity: match d.severity {
+                            Some(DiagnosticSeverity::ERROR) => "error",
+                            Some(DiagnosticSeverity::WARNING) => "warning",
+                            Some(DiagnosticSeverity::INFORMATION) => "info",
+                            _ => "hint",
+                        }
+                        .to_string(),
+                        message: d.message.clone(),
+                        source: d.source.clone(),
+                        code: d.code.as_ref().map(|c| match c {
+                            NumberOrString::Number(n) => n.to_string(),
+                            NumberOrString::String(s) => s.clone(),
+                        }),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let lines_in_file = editor
+            .document_by_path(&path)
+            .map(|doc| doc.text().len_lines());
+        helix_mcp::FileDiagnostics {
+            path,
+            lines_in_file,
+            items,
+        }
+    }
+
     /// Read the current string content of `path` — from the open buffer if available,
     /// otherwise from disk.  Returns an empty string for new (not-yet-existing) files.
     fn mcp_read_content(editor: &helix_view::Editor, path: &std::path::Path) -> String {
@@ -2419,56 +2467,31 @@ impl Application {
             }
 
             McpCommand::GetDiagnostics { path, reply } => {
-                fn diag_to_item(
-                    p: std::path::PathBuf,
-                    d: &helix_core::diagnostic::Diagnostic,
-                ) -> helix_mcp::DiagnosticItem {
-                    use helix_core::diagnostic::{NumberOrString, Severity};
-                    let severity = match d.severity {
-                        Some(Severity::Error) => "error",
-                        Some(Severity::Warning) => "warning",
-                        Some(Severity::Info) => "info",
-                        _ => "hint",
+                let files = match path {
+                    Some(p) => vec![Self::mcp_file_diagnostics(&self.editor, p)],
+                    None => {
+                        // Every file a language server reported on (open or not),
+                        // plus every open document so its line count is known.
+                        let mut paths: Vec<std::path::PathBuf> = self
+                            .editor
+                            .diagnostics
+                            .keys()
+                            .filter_map(|uri| uri.as_path().map(Path::to_path_buf))
+                            .collect();
+                        for doc in self.editor.documents() {
+                            if let Some(p) = doc.path() {
+                                if !paths.iter().any(|known| known == p) {
+                                    paths.push(p.to_path_buf());
+                                }
+                            }
+                        }
+                        paths
+                            .into_iter()
+                            .map(|p| Self::mcp_file_diagnostics(&self.editor, p))
+                            .collect()
                     }
-                    .to_string();
-                    let code = d.code.as_ref().map(|c| match c {
-                        NumberOrString::Number(n) => n.to_string(),
-                        NumberOrString::String(s) => s.clone(),
-                    });
-                    helix_mcp::DiagnosticItem {
-                        path: p,
-                        line: d.line,
-                        col: d.range.start,
-                        severity,
-                        message: d.message.clone(),
-                        source: d.source.clone(),
-                        code,
-                    }
-                }
-
-                let items = if let Some(p) = path {
-                    self.editor
-                        .document_by_path(&p)
-                        .map(|doc| {
-                            doc.diagnostics()
-                                .iter()
-                                .map(|d| diag_to_item(p.clone(), d))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    self.editor
-                        .documents()
-                        .flat_map(|doc| {
-                            let p = doc.path().map(|x| x.to_owned()).unwrap_or_default();
-                            doc.diagnostics()
-                                .iter()
-                                .map(move |d| diag_to_item(p.clone(), d))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect()
                 };
-                let _ = reply.send(items);
+                let _ = reply.send(files);
             }
 
             McpCommand::Hover { path, line, col, reply } => {
