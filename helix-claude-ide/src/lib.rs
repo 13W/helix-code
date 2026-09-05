@@ -10,6 +10,7 @@
 //! lock file and the JSON-RPC dispatch, and delegates tool calls to a
 //! [`ToolHandler`] supplied by the embedding application.
 
+pub mod clients;
 pub mod diagnostics;
 pub mod diff;
 pub mod handler;
@@ -17,6 +18,7 @@ pub mod jsonrpc;
 pub mod lockfile;
 pub mod notify;
 pub mod port;
+pub mod procinfo;
 pub mod server;
 pub mod tools;
 pub mod transport;
@@ -30,6 +32,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+pub use clients::{ClientId, ClientInfo, ClientSnapshot, Clients, DEFAULT_MAX_CLIENTS};
 pub use handler::{EditorHandler, Session};
 pub use lockfile::LockFile;
 pub use server::Dispatcher;
@@ -51,6 +54,8 @@ pub struct Config {
     pub fixed_port: Option<u16>,
     /// Override the lock directory (tests); `None` resolves per PROTO §1.1.
     pub lock_dir: Option<PathBuf>,
+    /// How many CLIs may be connected at once (T8); further upgrades get HTTP 503.
+    pub max_clients: usize,
 }
 
 impl Config {
@@ -61,6 +66,7 @@ impl Config {
             pid: std::process::id(),
             fixed_port: None,
             lock_dir: None,
+            max_clients: DEFAULT_MAX_CLIENTS,
         }
     }
 }
@@ -76,21 +82,43 @@ impl Notifier {
         Notifier { shared }
     }
 
-    /// Send `{"jsonrpc":"2.0","method":..,"params":..}` to the connected
+    /// Send `{"jsonrpc":"2.0","method":..,"params":..}` to every connected
     /// client. Returns `false` if nobody is connected.
     pub fn notify(&self, method: &str, params: Value) -> bool {
-        self.shared.notify(method, params)
+        self.notify_all(method, params) > 0
+    }
+
+    /// Broadcast; returns the number of clients the frame was queued for.
+    pub fn notify_all(&self, method: &str, params: Value) -> usize {
+        self.shared.notify_all(method, params)
+    }
+
+    /// Send to one client; `false` if it is gone.
+    pub fn notify_one(&self, client: ClientId, method: &str, params: Value) -> bool {
+        self.shared.notify_one(client, method, params)
     }
 
     pub fn is_connected(&self) -> bool {
         self.shared.is_connected()
+    }
+
+    pub fn client_count(&self) -> usize {
+        self.shared.client_count()
+    }
+
+    pub fn clients(&self) -> Vec<ClientSnapshot> {
+        self.shared.clients.snapshots()
+    }
+
+    pub fn client(&self, id: ClientId) -> Option<ClientSnapshot> {
+        self.shared.clients.snapshot(id)
     }
 }
 
 impl std::fmt::Debug for Notifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Notifier")
-            .field("connected", &self.is_connected())
+            .field("clients", &self.client_count())
             .finish()
     }
 }
@@ -130,8 +158,26 @@ impl IdeServerHandle {
         &self.inner.lock_path
     }
 
+    /// At least one client is connected.
     pub fn is_connected(&self) -> bool {
         self.inner.shared.is_connected()
+    }
+
+    pub fn client_count(&self) -> usize {
+        self.inner.shared.client_count()
+    }
+
+    pub fn max_clients(&self) -> usize {
+        self.inner.shared.clients.max_clients()
+    }
+
+    /// Connected clients in connection order.
+    pub fn clients(&self) -> Vec<ClientSnapshot> {
+        self.inner.shared.clients.snapshots()
+    }
+
+    pub fn client(&self, id: ClientId) -> Option<ClientSnapshot> {
+        self.inner.shared.clients.snapshot(id)
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -142,9 +188,26 @@ impl IdeServerHandle {
         Notifier::new(Arc::clone(&self.inner.shared))
     }
 
-    /// See [`Notifier::notify`].
+    /// See [`Notifier::notify`] (broadcast).
     pub fn notify(&self, method: &str, params: Value) -> bool {
-        self.inner.shared.notify(method, params)
+        self.inner.shared.notify_all(method, params) > 0
+    }
+
+    /// See [`Notifier::notify_all`].
+    pub fn notify_all(&self, method: &str, params: Value) -> usize {
+        self.inner.shared.notify_all(method, params)
+    }
+
+    /// See [`Notifier::notify_one`].
+    pub fn notify_one(&self, client: ClientId, method: &str, params: Value) -> bool {
+        self.inner.shared.notify_one(client, method, params)
+    }
+
+    /// Disconnect one client with close code 1000 and `reason`
+    /// (`:claude-ide-disconnect`). The CLI will try to reconnect a few times
+    /// (PROTO §2.6 as observed). `false` if no such client.
+    pub fn close_client(&self, client: ClientId, reason: &str) -> bool {
+        self.inner.shared.close_client(client, reason)
     }
 
     /// Remove the lock file without stopping the server. Safe to call from a
@@ -155,13 +218,13 @@ impl IdeServerHandle {
         }
     }
 
-    /// Disconnect the client, stop accepting connections and delete the lock
-    /// file. Idempotent.
+    /// Disconnect every client, stop accepting connections and delete the
+    /// lock file. Idempotent.
     pub async fn stop(&self) {
         if self.inner.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.inner.shared.close_client("IDE server stopping");
+        self.inner.shared.close_all("IDE server stopping");
         let _ = self.inner.shutdown.send(true);
         let task = self.inner.server_task.lock().unwrap().take();
         if let Some(task) = task {
@@ -180,7 +243,7 @@ impl std::fmt::Debug for IdeServerHandle {
         f.debug_struct("IdeServerHandle")
             .field("port", &self.inner.port)
             .field("lock_path", &self.inner.lock_path)
-            .field("connected", &self.is_connected())
+            .field("clients", &self.client_count())
             .field("stopped", &self.is_stopped())
             .finish()
     }
@@ -190,12 +253,21 @@ impl std::fmt::Debug for IdeServerHandle {
 ///
 /// Must be called from within a Tokio runtime; the accept loop is spawned on it.
 pub async fn start(config: Config, handler: SharedHandler) -> anyhow::Result<IdeServerHandle> {
+    if config.max_clients == 0 {
+        anyhow::bail!("max-clients must be at least 1");
+    }
     let listener = port::bind(config.fixed_port).await?;
     let port = listener.local_addr()?.port();
 
     let auth_token = uuid::Uuid::new_v4().to_string();
-    let shared = transport::Shared::new(auth_token.clone(), Dispatcher::new(handler));
-    let app = transport::router(Arc::clone(&shared));
+    let clients = Arc::new(Clients::new(config.max_clients));
+    let shared = transport::Shared::new(
+        auth_token.clone(),
+        Dispatcher::new(handler, Arc::clone(&clients)),
+        clients,
+    );
+    let app = transport::router(Arc::clone(&shared))
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -232,8 +304,9 @@ pub async fn start(config: Config, handler: SharedHandler) -> anyhow::Result<Ide
         }
     };
     log::info!(
-        "claude-ide: listening on ws://127.0.0.1:{port} as {:?}, lock file {}",
+        "claude-ide: listening on ws://127.0.0.1:{port} as {:?} (max {} clients), lock file {}",
         config.ide_name,
+        config.max_clients,
         lock_path.display()
     );
 

@@ -1,19 +1,20 @@
 //! WebSocket transport (PROTO §2): `127.0.0.1` only, header token check,
-//! `mcp` sub-protocol echo, a single client at a time, one JSON-RPC message
-//! per text frame, no keepalive.
+//! `mcp` sub-protocol echo, up to `max-clients` concurrent clients (T8), one
+//! JSON-RPC message per text frame, no keepalive.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
+use crate::clients::{ClientId, Clients};
 use crate::jsonrpc::{self, Incoming, OutgoingNotification};
 use crate::server::Dispatcher;
 
@@ -22,6 +23,8 @@ pub const SUBPROTOCOL: &str = "mcp";
 /// RFC 6455 "policy violation" — what the extension uses for a bad token.
 pub const CLOSE_UNAUTHORIZED: u16 = 1008;
 pub const CLOSE_NORMAL: u16 = 1000;
+/// Body of the `503 Service Unavailable` answer when `max-clients` is reached.
+pub const TOO_MANY_CLIENTS_BODY: &str = "too many clients";
 /// How long a finished session waits for its writer to flush before aborting it.
 const WRITER_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -29,88 +32,100 @@ const WRITER_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 pub struct Shared {
     pub auth_token: String,
     pub dispatcher: Dispatcher,
-    client: Mutex<Option<ClientConn>>,
-    next_client_id: AtomicU64,
-}
-
-struct ClientConn {
-    id: u64,
-    out_tx: mpsc::UnboundedSender<Message>,
-    /// Flipped to `true` to make the session's read loop exit.
-    close: watch::Sender<bool>,
+    pub clients: Arc<Clients>,
 }
 
 impl Shared {
-    pub fn new(auth_token: String, dispatcher: Dispatcher) -> Arc<Self> {
+    pub fn new(auth_token: String, dispatcher: Dispatcher, clients: Arc<Clients>) -> Arc<Self> {
         Arc::new(Shared {
             auth_token,
             dispatcher,
-            client: Mutex::new(None),
-            next_client_id: AtomicU64::new(1),
+            clients,
         })
     }
 
     pub fn is_connected(&self) -> bool {
-        self.client.lock().unwrap().is_some()
+        !self.clients.is_empty()
     }
 
-    /// Send a JSON-RPC notification to the current client. Returns `false`
-    /// when no client is connected (the frame is dropped, like the extension
-    /// does before a connection exists).
-    pub fn notify(&self, method: &str, params: Value) -> bool {
-        let frame = match serde_json::to_string(&OutgoingNotification::new(method, params)) {
-            Ok(s) => s,
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    fn frame(method: &str, params: Value) -> Option<Message> {
+        match serde_json::to_string(&OutgoingNotification::new(method, params)) {
+            Ok(s) => Some(Message::Text(s.into())),
             Err(e) => {
                 log::error!("claude-ide: cannot serialize notification {method}: {e}");
-                return false;
+                None
             }
-        };
-        let guard = self.client.lock().unwrap();
-        match guard.as_ref() {
-            Some(client) => client.out_tx.send(Message::Text(frame.into())).is_ok(),
+        }
+    }
+
+    /// Send a JSON-RPC notification to every connected client. Returns the
+    /// number of clients it was queued for (0 when nobody is connected — the
+    /// frame is dropped, like the extension does before a connection exists).
+    pub fn notify_all(&self, method: &str, params: Value) -> usize {
+        match Self::frame(method, params) {
+            Some(msg) => self.clients.broadcast(msg),
+            None => 0,
+        }
+    }
+
+    /// Send a JSON-RPC notification to one client. `false` if it is gone.
+    pub fn notify_one(&self, id: ClientId, method: &str, params: Value) -> bool {
+        match Self::frame(method, params) {
+            Some(msg) => self.clients.send_to(id, msg),
             None => false,
         }
     }
 
-    /// Disconnect the current client (if any) with a normal close.
-    pub fn close_client(&self, reason: &str) {
-        let prev = self.client.lock().unwrap().take();
-        if let Some(prev) = prev {
-            prev.shutdown(reason);
-            self.dispatcher.handler().on_client_disconnected();
+    /// Disconnect one client with a normal close. The handler is told right
+    /// away (the session task finds its slot already gone and stays silent).
+    pub fn close_client(&self, id: ClientId, reason: &str) -> bool {
+        match self.clients.remove(id) {
+            Some(conn) => {
+                log::info!("claude-ide: closing client {id}: {reason}");
+                conn.shutdown(reason);
+                self.dispatcher.handler().on_client_disconnected(id);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Register a new client, evicting the previous one (PROTO §2.3).
-    fn install_client(&self, conn: ClientConn) {
-        let prev = self.client.lock().unwrap().replace(conn);
-        if let Some(prev) = prev {
-            log::info!("claude-ide: disconnecting previous WebSocket client");
-            prev.shutdown("Replaced by a new client");
-            self.dispatcher.handler().on_client_disconnected();
-        }
-    }
-
-    /// Clear the slot only if it still holds `id` (a newer client may have
-    /// replaced us already).
-    fn remove_client(&self, id: u64) -> bool {
-        let mut guard = self.client.lock().unwrap();
-        if guard.as_ref().map(|c| c.id) == Some(id) {
-            *guard = None;
-            true
-        } else {
-            false
+    /// Disconnect every client (server stopping).
+    pub fn close_all(&self, reason: &str) {
+        for conn in self.clients.drain() {
+            log::info!("claude-ide: closing client {}: {reason}", conn.id);
+            conn.shutdown(reason);
+            self.dispatcher.handler().on_client_disconnected(conn.id);
         }
     }
 }
 
-impl ClientConn {
-    fn shutdown(&self, reason: &str) {
-        let _ = self.out_tx.send(Message::Close(Some(CloseFrame {
-            code: CLOSE_NORMAL,
-            reason: reason.to_string().into(),
-        })));
-        let _ = self.close.send(true);
+/// Frees a reserved client slot if the upgrade callback never runs (the
+/// client vanished between the HTTP answer and the WebSocket handshake).
+struct SlotGuard {
+    shared: Arc<Shared>,
+    id: ClientId,
+    armed: bool,
+}
+
+impl SlotGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if self.armed && self.shared.clients.remove(self.id).is_some() {
+            log::info!(
+                "claude-ide: client {} never completed the upgrade; slot released",
+                self.id
+            );
+        }
     }
 }
 
@@ -121,6 +136,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
 
 async fn upgrade(
     State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -131,7 +147,9 @@ async fn upgrade(
         .map(|token| token == shared.auth_token)
         .unwrap_or(false);
     if !authorized {
-        log::warn!("claude-ide: rejected WebSocket client with missing or wrong auth token");
+        log::warn!(
+            "claude-ide: rejected WebSocket client {peer} with missing or wrong auth token"
+        );
         // The extension completes the upgrade and then closes with 1008.
         return ws.on_upgrade(|mut socket| async move {
             let _ = socket
@@ -142,23 +160,47 @@ async fn upgrade(
                 .await;
         });
     }
-    ws.on_upgrade(move |socket| run_session(socket, shared))
+
+    // T8: the slot is reserved before the upgrade so that the limit check and
+    // the insertion are one atomic step; over the limit the CLI gets a plain
+    // HTTP 503 and keeps retrying with its own finite backoff (PROTO §2.6).
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<Message>();
+    let (close_tx, close_rx) = watch::channel(false);
+    let id = match shared.clients.try_insert(out_tx.clone(), close_tx) {
+        Ok(id) => id,
+        Err(e) => {
+            log::warn!("claude-ide: refusing WebSocket client {peer}: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, TOO_MANY_CLIENTS_BODY).into_response();
+        }
+    };
+    let guard = SlotGuard {
+        shared: Arc::clone(&shared),
+        id,
+        armed: true,
+    };
+    ws.on_upgrade(move |socket| run_session(socket, shared, id, out_tx, out_rx, close_rx, guard))
 }
 
-async fn run_session(socket: WebSocket, shared: Arc<Shared>) {
-    let id = shared.next_client_id.fetch_add(1, Ordering::Relaxed);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
-    let (close_tx, mut close_rx) = watch::channel(false);
-    shared.install_client(ClientConn {
-        id,
-        out_tx: out_tx.clone(),
-        close: close_tx,
-    });
-    log::info!("claude-ide: client #{id} connected");
+async fn run_session(
+    socket: WebSocket,
+    shared: Arc<Shared>,
+    id: ClientId,
+    out_tx: mpsc::UnboundedSender<Message>,
+    mut out_rx: mpsc::UnboundedReceiver<Message>,
+    mut close_rx: watch::Receiver<bool>,
+    mut guard: SlotGuard,
+) {
+    // From here on this task owns the slot's lifecycle.
+    guard.disarm();
+    log::info!(
+        "claude-ide: client {id} connected ({} of {})",
+        shared.client_count(),
+        shared.clients.max_clients()
+    );
     shared
         .dispatcher
         .handler()
-        .on_client_connected(crate::Notifier::new(Arc::clone(&shared)));
+        .on_client_connected(id, crate::Notifier::new(Arc::clone(&shared)));
 
     let (mut sink, mut stream) = socket.split();
 
@@ -182,18 +224,18 @@ async fn run_session(socket: WebSocket, shared: Arc<Shared>) {
             _ = close_rx.changed() => break,
             next = stream.next() => match next {
                 Some(Ok(Message::Text(text))) => {
-                    handle_text(&shared, &out_tx, text.as_str());
+                    handle_text(&shared, id, &out_tx, text.as_str());
                 }
                 Some(Ok(Message::Close(frame))) => {
                     // The WebSocket layer already queued the close reply.
-                    log::info!("claude-ide: client #{id} closed ({frame:?})");
+                    log::info!("claude-ide: client {id} closed ({frame:?})");
                     break;
                 }
                 // Binary frames are not part of the protocol; ping/pong are
                 // answered by the WebSocket layer itself.
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
-                    log::info!("claude-ide: client #{id} socket error: {e}");
+                    log::info!("claude-ide: client {id} socket error: {e}");
                     break;
                 }
                 None => break,
@@ -202,31 +244,40 @@ async fn run_session(socket: WebSocket, shared: Arc<Shared>) {
     }
 
     // Drop our slot first: the `ClientConn` inside holds an `out_tx` clone,
-    // and the writer only finishes once every sender is gone.
-    let was_current = shared.remove_client(id);
+    // and the writer only finishes once every sender is gone. `None` means
+    // `close_client`/`close_all` already removed it and told the handler.
+    let was_present = shared.clients.remove(id).is_some();
     drop(out_tx);
     let abort = writer.abort_handle();
     if tokio::time::timeout(WRITER_GRACE, writer).await.is_err() {
         abort.abort();
     }
-    if was_current {
-        log::info!("claude-ide: client #{id} disconnected");
-        shared.dispatcher.handler().on_client_disconnected();
+    if was_present {
+        log::info!(
+            "claude-ide: client {id} disconnected ({} left)",
+            shared.client_count()
+        );
+        shared.dispatcher.handler().on_client_disconnected(id);
     }
 }
 
-fn handle_text(shared: &Arc<Shared>, out_tx: &mpsc::UnboundedSender<Message>, text: &str) {
+fn handle_text(
+    shared: &Arc<Shared>,
+    id: ClientId,
+    out_tx: &mpsc::UnboundedSender<Message>,
+    text: &str,
+) {
     match jsonrpc::parse(text) {
         Ok(Incoming::Request(req)) => {
-            log::debug!("claude-ide: <- {} (id {})", req.method, req.id);
+            log::debug!("claude-ide: {id} <- {} (id {})", req.method, req.id);
             // Each request runs on its own task so a blocking `openDiff`
             // never delays `close_tab` / `closeAllDiffTabs` (PROTO §5.4).
             let dispatcher = shared.dispatcher.clone();
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
-                let response = dispatcher.handle_request(req).await;
+                let response = dispatcher.handle_request(id, req).await;
                 log::debug!(
-                    "claude-ide: -> id {} {}",
+                    "claude-ide: {id} -> id {} {}",
                     response.id,
                     if response.error.is_some() {
                         "error"
@@ -243,14 +294,14 @@ fn handle_text(shared: &Arc<Shared>, out_tx: &mpsc::UnboundedSender<Message>, te
             });
         }
         Ok(Incoming::Notification(note)) => {
-            log::debug!("claude-ide: <- notification {}", note.method);
-            shared.dispatcher.handle_notification(note)
+            log::debug!("claude-ide: {id} <- notification {}", note.method);
+            shared.dispatcher.handle_notification(id, note)
         }
-        Ok(Incoming::Response(id)) => {
-            log::debug!("claude-ide: ignoring unexpected response for id {id}");
+        Ok(Incoming::Response(rid)) => {
+            log::debug!("claude-ide: {id} ignoring unexpected response for id {rid}");
         }
         // The extension reports parse errors via `onerror` and keeps the
         // connection open; we do the same.
-        Err(e) => log::warn!("claude-ide: dropping unparseable frame: {e}"),
+        Err(e) => log::warn!("claude-ide: {id} dropping unparseable frame: {e}"),
     }
 }

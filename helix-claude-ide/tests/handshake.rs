@@ -1,5 +1,5 @@
 //! End-to-end transport tests against a real `tokio-tungstenite` client,
-//! covering PROTO §1.1, §2 and §3.
+//! covering PROTO §1.1, §2 and §3, plus the T8 multi-client rules.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,10 +23,15 @@ struct Fixture {
 }
 
 async fn start() -> Fixture {
+    start_with(helix_claude_ide::DEFAULT_MAX_CLIENTS).await
+}
+
+async fn start_with(max_clients: usize) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::new("/tmp/workspace", "Helix-test");
     config.pid = 4242;
     config.lock_dir = Some(dir.path().join("ide"));
+    config.max_clients = max_clients;
     let handle = helix_claude_ide::start(config, Arc::new(NotImplementedHandler))
         .await
         .unwrap();
@@ -237,40 +242,201 @@ async fn initialize_and_tools_list() {
     fx.handle.stop().await;
 }
 
+async fn next_text(ws: &mut Ws, timeout: Duration) -> Option<Value> {
+    loop {
+        match tokio::time::timeout(timeout, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                return Some(serde_json::from_str(text.as_str()).unwrap())
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => return None,
+        }
+    }
+}
+
+/// T8: several CLIs share one server; nobody is evicted.
 #[tokio::test(flavor = "multi_thread")]
-async fn second_client_evicts_first() {
+async fn two_clients_coexist() {
     let fx = start().await;
     let mut first = connect(&fx).await;
-    let _ = rpc(&mut first, 0, "ping", json!({})).await;
+    let init = rpc(&mut first, 0, "initialize", json!({"protocolVersion": "2025-11-25"})).await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     let mut second = connect(&fx).await;
+    let init = rpc(&mut second, 0, "initialize", json!({"protocolVersion": "2025-11-25"})).await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
 
+    assert_eq!(fx.handle.client_count(), 2);
+    let ids: Vec<u64> = fx.handle.clients().iter().map(|c| c.id.0).collect();
+    assert_eq!(ids, [1, 2]);
+
+    // Both are fully functional.
+    for ws in [&mut first, &mut second] {
+        let list = rpc(ws, 1, "tools/list", json!({})).await;
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 4);
+    }
+
+    // The first client was not closed in the meantime.
+    assert!(
+        next_text(&mut first, Duration::from_millis(200)).await.is_none(),
+        "first client must not receive anything unsolicited"
+    );
+
+    // Broadcast reaches both; a targeted frame reaches one.
+    assert_eq!(fx.handle.notify_all("selection_changed", json!({"text": "x"})), 2);
+    for ws in [&mut first, &mut second] {
+        let note = next_text(ws, Duration::from_secs(5)).await.expect("broadcast frame");
+        assert_eq!(note["method"], "selection_changed");
+        assert!(note.get("id").is_none());
+    }
+    let second_id = fx.handle.clients()[1].id;
+    assert!(fx.handle.notify_one(second_id, "at_mentioned", json!({"filePath": "/w/a"})));
+    let note = next_text(&mut second, Duration::from_secs(5)).await.expect("targeted frame");
+    assert_eq!(note["method"], "at_mentioned");
+    assert!(next_text(&mut first, Duration::from_millis(300)).await.is_none());
+
+    // Closing one from the IDE side leaves the other untouched.
+    assert!(fx.handle.close_client(fx.handle.clients()[0].id, "Closed by user"));
     let msg = tokio::time::timeout(Duration::from_secs(5), first.next())
         .await
         .expect("first client should be closed");
     match msg {
         Some(Ok(Message::Close(frame))) => {
-            assert_eq!(frame.map(|f| u16::from(f.code)), Some(1000));
+            let frame = frame.unwrap();
+            assert_eq!(u16::from(frame.code), 1000);
+            assert_eq!(frame.reason.as_str(), "Closed by user");
         }
-        None | Some(Err(_)) => {} // connection torn down — also acceptable
+        None | Some(Err(_)) => {}
         other => panic!("expected close, got {other:?}"),
     }
-
-    // The new client is fully functional and still counted as connected.
-    let pong = rpc(&mut second, 0, "ping", json!({})).await;
+    for _ in 0..50 {
+        if fx.handle.client_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(fx.handle.client_count(), 1);
+    let pong = rpc(&mut second, 2, "ping", json!({})).await;
     assert_eq!(pong["result"], json!({}));
-    assert!(fx.handle.is_connected());
+    assert!(!fx.handle.close_client(helix_claude_ide::ClientId(99), "nope"));
 
-    // The notifier targets the surviving client.
-    assert!(fx.handle.notify("selection_changed", json!({"text": ""})));
-    let note = tokio::time::timeout(Duration::from_secs(5), second.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let note: Value = serde_json::from_str(note.to_text().unwrap()).unwrap();
-    assert_eq!(note["method"], "selection_changed");
-    assert!(note.get("id").is_none());
+    fx.handle.stop().await;
+}
 
+/// T8: over `max-clients` the upgrade is refused with HTTP 503 — no eviction,
+/// so two auto-reconnecting CLIs never ping-pong.
+#[tokio::test(flavor = "multi_thread")]
+async fn max_clients_rejected_with_503() {
+    let fx = start_with(1).await;
+    assert_eq!(fx.handle.max_clients(), 1);
+    let mut first = connect(&fx).await;
+    let _ = rpc(&mut first, 0, "ping", json!({})).await;
+
+    let refused = connect_async(request(fx.handle.port(), Some(&fx.token))).await;
+    match refused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 503);
+            let body = response.body().as_deref().unwrap_or_default();
+            assert_eq!(std::str::from_utf8(body).unwrap(), "too many clients");
+        }
+        other => panic!("expected HTTP 503, got {other:?}"),
+    }
+    assert_eq!(fx.handle.client_count(), 1);
+
+    // The first client is untouched.
+    let pong = rpc(&mut first, 1, "ping", json!({})).await;
+    assert_eq!(pong["result"], json!({}));
+
+    // Once it leaves, the slot is free again.
+    first.close(None).await.unwrap();
+    for _ in 0..50 {
+        if fx.handle.client_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut third = connect(&fx).await;
+    let pong = rpc(&mut third, 0, "ping", json!({})).await;
+    assert_eq!(pong["result"], json!({}));
+    assert_eq!(fx.handle.client_count(), 1);
+
+    fx.handle.stop().await;
+}
+
+/// T8: `ide_connected {pid}` is remembered per connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn ide_connected_sets_pid() {
+    let fx = start().await;
+    let mut ws = connect(&fx).await;
+    let _ = rpc(&mut ws, 0, "initialize", json!({"protocolVersion": "2025-11-25"})).await;
+    assert_eq!(fx.handle.clients()[0].pid, None);
+    ws.send(Message::Text(
+        json!({"jsonrpc":"2.0","method":"ide_connected","params":{"pid":72464}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    // Notifications get no reply; a ping orders us behind it.
+    let _ = rpc(&mut ws, 1, "ping", json!({})).await;
+    let client = &fx.handle.clients()[0];
+    assert_eq!(client.pid, Some(72464));
+    assert_eq!(fx.handle.client(client.id).unwrap().pid, Some(72464));
+    fx.handle.stop().await;
+}
+
+/// T9.1: `set_permission_mode` is accepted (`OK`), stored per client and
+/// absent from `tools/list`.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_permission_mode_ok_and_unlisted() {
+    let fx = start().await;
+    let mut ws = connect(&fx).await;
+    let _ = rpc(&mut ws, 0, "initialize", json!({"protocolVersion": "2025-11-25"})).await;
+    assert_eq!(fx.handle.clients()[0].permission_mode, None);
+
+    let ok = rpc(
+        &mut ws,
+        1,
+        "tools/call",
+        json!({"name": "set_permission_mode", "arguments": {"mode": "acceptEdits"}}),
+    )
+    .await;
+    assert_eq!(
+        ok["result"],
+        json!({"content": [{"type": "text", "text": "OK"}]})
+    );
+    assert_eq!(
+        fx.handle.clients()[0].permission_mode.as_deref(),
+        Some("acceptEdits")
+    );
+
+    let again = rpc(
+        &mut ws,
+        2,
+        "tools/call",
+        json!({"name": "set_permission_mode", "arguments": {"mode": "plan"}}),
+    )
+    .await;
+    assert_eq!(again["result"]["content"][0]["text"], "OK");
+    assert_eq!(fx.handle.clients()[0].permission_mode.as_deref(), Some("plan"));
+
+    let bad = rpc(
+        &mut ws,
+        3,
+        "tools/call",
+        json!({"name": "set_permission_mode", "arguments": {}}),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], -32602);
+
+    let list = rpc(&mut ws, 4, "tools/list", json!({})).await;
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 4);
+    assert!(!names.contains(&"set_permission_mode"));
     fx.handle.stop().await;
 }
 

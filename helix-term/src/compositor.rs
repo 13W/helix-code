@@ -134,6 +134,11 @@ impl Compositor {
         self.layers.pop()
     }
 
+    /// Whether a layer with this `id` is on the stack.
+    pub fn contains(&self, id: &'static str) -> bool {
+        self.layers.iter().any(|layer| layer.id() == Some(id))
+    }
+
     pub fn remove(&mut self, id: &'static str) -> Option<Box<dyn Component>> {
         let idx = self
             .layers

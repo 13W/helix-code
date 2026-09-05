@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail};
 use arc_swap::ArcSwapOption;
-use helix_claude_ide::{EditorHandler, Session, SharedHandler};
+use helix_claude_ide::{ClientSnapshot, EditorHandler, Session, SharedHandler};
 use helix_mcp::DiffOutcome;
 use helix_view::editor::ClaudeDiffView;
 use helix_view::{DocumentId, Editor};
@@ -60,8 +60,12 @@ pub fn start<'e>(
     let mcp_tx = helix_mcp::editor_tx()
         .ok_or_else(|| anyhow!("editor command channel is not initialised"))?;
     let handler = Arc::new(EditorHandler::new(mcp_tx));
+    handler.set_exclusive_display(
+        editor.config().claude_ide.diff_mode == helix_view::editor::ClaudeIdeDiffMode::Prompt,
+    );
     let mut config = helix_claude_ide::Config::new(workspace_folder(), ide_name(editor, name));
     config.fixed_port = port;
+    config.max_clients = editor.config().claude_ide.max_clients;
 
     let runtime = tokio::runtime::Handle::current();
     let shared: SharedHandler = handler.clone();
@@ -138,15 +142,20 @@ pub fn current_split(editor: &Editor) -> anyhow::Result<ClaudeDiffView> {
 /// Decide a split proposal (PROTO §5.3): resolve the CLI call, tear the
 /// split down and, when accepted, reload the target buffer once the CLI has
 /// written the file. Returns `false` if no such proposal exists.
-pub fn resolve_split(editor: &mut Editor, tab_name: &str, outcome: DiffOutcome) -> bool {
-    let Some(view) = editor.claude_diff_view_for_tab(tab_name).cloned() else {
+pub fn resolve_split(
+    editor: &mut Editor,
+    client_id: u64,
+    tab_name: &str,
+    outcome: DiffOutcome,
+) -> bool {
+    let Some(view) = editor.claude_diff_view_for_tab(client_id, tab_name).cloned() else {
         return false;
     };
     let accepted = matches!(outcome, DiffOutcome::Saved(_));
     if let Some(tx) = view.reply.lock().unwrap().take() {
         let _ = tx.send(outcome);
     }
-    crate::application::Application::claude_close_diff_split(editor, tab_name);
+    crate::application::Application::claude_close_diff_split(editor, client_id, tab_name);
     if accepted {
         crate::application::Application::claude_reload_after_write(view.path.clone());
     }
@@ -162,10 +171,29 @@ pub fn accept_split(editor: &mut Editor, view: &ClaudeDiffView) -> anyhow::Resul
         .get(&view.right)
         .map(|doc| doc.text().to_string())
         .ok_or_else(|| anyhow!("the proposal buffer is gone"))?;
-    resolve_split(editor, &view.tab_name, DiffOutcome::Saved(text));
+    resolve_split(editor, view.client.id, &view.tab_name, DiffOutcome::Saved(text));
     Ok(())
 }
 
 pub fn reject_split(editor: &mut Editor, view: &ClaudeDiffView) {
-    resolve_split(editor, &view.tab_name, DiffOutcome::Rejected);
+    resolve_split(editor, view.client.id, &view.tab_name, DiffOutcome::Rejected);
+}
+
+// ── clients (T8) ─────────────────────────────────────────────────────────────
+
+/// `claude <pid>` when the pid is known, else `client #N` — for status lines.
+pub fn client_label(client: &ClientSnapshot) -> String {
+    match client.pid {
+        Some(pid) => format!("claude {pid}"),
+        None => format!("client {}", client.id),
+    }
+}
+
+/// Working directory of the CLI process, `?` when unknown (non-Linux or gone).
+pub fn client_cwd(client: &ClientSnapshot) -> String {
+    client
+        .pid
+        .and_then(helix_claude_ide::procinfo::cwd_of_pid)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
 }

@@ -107,7 +107,9 @@
 | `:agent-whoami`, `:aw` | Show authenticated Claude Code account info via ACP: agent-whoami [agent-name] |
 | `:claude-ide-start` | Start the Claude Code IDE server so `claude --ide` can connect: claude-ide-start [port] |
 | `:claude-ide-stop` | Stop the Claude Code IDE server and remove its lock file. |
-| `:claude-mention` | Insert the current file (and selected lines) as an @-mention into the connected Claude Code prompt. |
+| `:claude-mention` | Insert the current file (and selected lines) as an @-mention into a Claude Code prompt: claude-mention [pid|#N]. Without an argument the focused client is used; with several clients and no focus a picker opens. |
+| `:claude-ide-focus` | Choose which connected Claude Code CLI :claude-mention addresses: claude-ide-focus [pid|#N|none]. Without an argument a picker opens. |
+| `:claude-ide-disconnect` | Close one Claude Code CLI connection: claude-ide-disconnect <pid|#N>. Its pending proposals are rejected; the CLI will try to reconnect a few times on its own. |
 | `:claude-diff-accept`, `:cda` | Accept the Claude Code proposal shown as a split, with the current contents of the proposal buffer. Same as :w in that buffer; closing it with :bc rejects it. |
 | `:claude-diff-reject`, `:cdr` | Reject the Claude Code proposal shown as a split and close it. |
-| `:claude-ide-status` | Show the Claude Code IDE server port, lock file, connection state and pending diffs. |
+| `:claude-ide-status` | Show the Claude Code IDE server port, lock file and connected CLIs (pid, permission mode, pending diffs, focus). |

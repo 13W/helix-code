@@ -11,12 +11,17 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::clients::ClientId;
 use crate::jsonrpc::RpcError;
 
 pub const OPEN_DIFF: &str = "openDiff";
 pub const CLOSE_TAB: &str = "close_tab";
 pub const CLOSE_ALL_DIFF_TABS: &str = "closeAllDiffTabs";
 pub const GET_DIAGNOSTICS: &str = "getDiagnostics";
+
+/// Called by the CLI when its permission mode changes (PROTO §4.5). Accepted
+/// by the dispatcher, stored per client, never published in `tools/list`.
+pub const SET_PERMISSION_MODE: &str = "set_permission_mode";
 
 pub const TOOL_NAMES: [&str; 4] = [OPEN_DIFF, CLOSE_TAB, CLOSE_ALL_DIFF_TABS, GET_DIAGNOSTICS];
 
@@ -189,19 +194,26 @@ impl ToolResult {
 ///
 /// `call` may block for as long as it likes (`openDiff` waits for the user);
 /// the transport runs each request on its own task, so a long call never
-/// delays `close_tab` or `closeAllDiffTabs`.
+/// delays `close_tab` or `closeAllDiffTabs`. Several CLI clients may be
+/// connected at once (T8): every call carries the [`ClientId`] it came from,
+/// and per-client state (pending diffs) must be keyed by it.
 #[async_trait]
 pub trait ToolHandler: Send + Sync + 'static {
-    async fn call(&self, name: &str, arguments: Value) -> anyhow::Result<ToolResult>;
+    async fn call(
+        &self,
+        client: ClientId,
+        name: &str,
+        arguments: Value,
+    ) -> anyhow::Result<ToolResult>;
 
-    /// A client finished the WebSocket upgrade. `notifier` can be used to
-    /// send IDE → CLI notifications for the lifetime of that client.
-    fn on_client_connected(&self, _notifier: crate::Notifier) {}
+    /// A client finished the WebSocket upgrade. `notifier` addresses every
+    /// client of this server (`notify_all`) or one of them (`notify_one`).
+    fn on_client_connected(&self, _client: ClientId, _notifier: crate::Notifier) {}
 
-    /// The current client went away (socket closed, replaced by a newer
-    /// client, or the server stopped). Pending `openDiff` calls should be
-    /// resolved as rejected here.
-    fn on_client_disconnected(&self) {}
+    /// `client` went away (socket closed, disconnected by the user, or the
+    /// server stopped). Its pending `openDiff` calls should be resolved as
+    /// rejected here; other clients are unaffected.
+    fn on_client_disconnected(&self, _client: ClientId) {}
 }
 
 /// Placeholder used until the editor wires real tools in: every call is
@@ -211,7 +223,12 @@ pub struct NotImplementedHandler;
 
 #[async_trait]
 impl ToolHandler for NotImplementedHandler {
-    async fn call(&self, name: &str, _arguments: Value) -> anyhow::Result<ToolResult> {
+    async fn call(
+        &self,
+        _client: ClientId,
+        name: &str,
+        _arguments: Value,
+    ) -> anyhow::Result<ToolResult> {
         Ok(ToolResult::error(format!("{name}: not implemented")))
     }
 }

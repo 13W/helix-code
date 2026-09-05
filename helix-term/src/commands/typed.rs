@@ -3144,22 +3144,293 @@ fn claude_ide_status(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    let message = match &cx.editor.claude_ide {
-        Some(session) => format!(
-            "Claude IDE: ws://127.0.0.1:{} · lock {} · client {} · pending diffs {}",
-            session.port(),
-            session.handle.lock_path().display(),
-            if session.is_connected() {
-                "connected"
-            } else {
-                "none"
-            },
-            session.handler.pending_diff_count()
-        ),
-        None => "Claude IDE server is not running (start with :claude-ide-start)".to_string(),
+    let Some(session) = cx.editor.claude_ide.clone() else {
+        cx.editor
+            .set_status("Claude IDE server is not running (start with :claude-ide-start)");
+        return Ok(());
     };
-    cx.editor.set_status(message);
+    let clients = session.clients();
+    let header = format!(
+        "Claude IDE ws://127.0.0.1:{} · lock {} · {} of {} clients · pending diffs {}",
+        session.port(),
+        session.handle.lock_path().display(),
+        clients.len(),
+        session.handle.max_clients(),
+        session.handler.pending_diff_count()
+    );
+    if clients.is_empty() {
+        cx.editor.set_status(header);
+        return Ok(());
+    }
+
+    // T8: one row per connected CLI.
+    let focus = session.handler.focus();
+    let active = session.handler.active_client();
+    let mut text = format!("{header}\n\n");
+    text.push_str(&format!(
+        "   {:<6} {:<8} {:<12} {:>5}  {}\n",
+        "client", "pid", "mode", "diffs", "cwd"
+    ));
+    for client in &clients {
+        let mark = if focus == Some(client.id) {
+            "\u{25CF} "
+        } else if active == Some(client.id) {
+            "\u{25CB} "
+        } else {
+            "  "
+        };
+        text.push_str(&format!(
+            " {mark}{:<6} {:<8} {:<12} {:>5}  {}\n",
+            client.id.to_string(),
+            client
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            client.permission_mode.as_deref().unwrap_or("?"),
+            session.handler.pending_count_for(client.id),
+            crate::claude_ide::client_cwd(client),
+        ));
+    }
+    text.push_str(
+        "\n\u{25CF} focus (:claude-ide-focus)   \u{25CB} default target of :claude-mention",
+    );
+    let callback = async move {
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |_editor: &mut Editor, compositor: &mut Compositor| {
+                let popup = Popup::new(CLAUDE_IDE_STATUS_ID, ui::Text::new(text)).auto_close(true);
+                compositor.replace_or_push(CLAUDE_IDE_STATUS_ID, popup);
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
     Ok(())
+}
+
+const CLAUDE_IDE_STATUS_ID: &str = "claude-ide-status";
+
+/// Open a picker over the connected CLIs (T8); `on_select` runs for the chosen one.
+fn claude_client_picker(
+    cx: &mut compositor::Context,
+    clients: Vec<helix_claude_ide::ClientSnapshot>,
+    on_select: impl Fn(&mut compositor::Context, &helix_claude_ide::ClientSnapshot)
+        + 'static
+        + Send
+        + Sync,
+) {
+    let callback = async move {
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |_editor: &mut Editor, compositor: &mut Compositor| {
+                let columns = [
+                    ui::PickerColumn::new(
+                        "client",
+                        |client: &helix_claude_ide::ClientSnapshot, _| {
+                            client.id.to_string().into()
+                        },
+                    ),
+                    ui::PickerColumn::new(
+                        "pid",
+                        |client: &helix_claude_ide::ClientSnapshot, _| {
+                            client
+                                .pid
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "?".to_string())
+                                .into()
+                        },
+                    ),
+                    ui::PickerColumn::new(
+                        "mode",
+                        |client: &helix_claude_ide::ClientSnapshot, _| {
+                            client
+                                .permission_mode
+                                .clone()
+                                .unwrap_or_else(|| "?".to_string())
+                                .into()
+                        },
+                    ),
+                    ui::PickerColumn::new(
+                        "cwd",
+                        |client: &helix_claude_ide::ClientSnapshot, _| {
+                            crate::claude_ide::client_cwd(client).into()
+                        },
+                    ),
+                ];
+                let picker = ui::Picker::new(columns, 1, clients, (), move |cx, client, _action| {
+                    on_select(cx, client)
+                });
+                compositor.push(Box::new(overlaid(picker)))
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+}
+
+fn claude_ide_focus(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let session = cx
+        .editor
+        .claude_ide
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
+    let set = |editor: &mut Editor, id: helix_claude_ide::ClientId| -> anyhow::Result<()> {
+        session.handler.set_focus(Some(id))?;
+        let label = session
+            .handler
+            .client(id)
+            .map(|c| crate::claude_ide::client_label(&c))
+            .unwrap_or_else(|| format!("client {id}"));
+        editor.set_status(format!("Claude Code focus: {label}"));
+        Ok(())
+    };
+    match args.first() {
+        Some("none") => {
+            session.handler.set_focus(None)?;
+            cx.editor.set_status("Claude Code focus cleared");
+            Ok(())
+        }
+        Some(arg) => {
+            let id = session.handler.resolve_client_arg(arg)?;
+            set(cx.editor, id)
+        }
+        None => {
+            let clients = session.clients();
+            match clients.as_slice() {
+                [] => anyhow::bail!("no Claude Code client is connected"),
+                [only] => set(cx.editor, only.id),
+                _ => {
+                    claude_client_picker(cx, clients, |cx, client| {
+                        if let Some(session) = cx.editor.claude_ide.clone() {
+                            match session.handler.set_focus(Some(client.id)) {
+                                Ok(()) => cx.editor.set_status(format!(
+                                    "Claude Code focus: {}",
+                                    crate::claude_ide::client_label(client)
+                                )),
+                                Err(e) => cx.editor.set_error(e.to_string()),
+                            }
+                        }
+                    });
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+fn claude_ide_disconnect(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let session = cx
+        .editor
+        .claude_ide
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
+    let arg = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: :claude-ide-disconnect <pid|#N>"))?;
+    let id = session.handler.resolve_client_arg(arg)?;
+    let label = session
+        .handler
+        .client(id)
+        .map(|c| crate::claude_ide::client_label(&c))
+        .unwrap_or_else(|| format!("client {id}"));
+    if !session.handle.close_client(id, "Closed by user") {
+        anyhow::bail!("no Claude Code client {id}");
+    }
+    cx.editor.set_status(format!(
+        "Disconnected {label}; the CLI may reconnect on its own"
+    ));
+    Ok(())
+}
+
+/// Send `at_mentioned` for the current buffer to `target` and report it.
+fn claude_send_mention(
+    editor: &mut Editor,
+    session: &helix_claude_ide::Session,
+    target: helix_claude_ide::ClientId,
+    path: &std::path::Path,
+    lines: Option<(usize, usize)>,
+    name: &str,
+) -> anyhow::Result<()> {
+    if !session.handler.mention(target, path, lines) {
+        anyhow::bail!("failed to send the mention to Claude Code {target}");
+    }
+    let who = session
+        .handler
+        .client(target)
+        .map(|c| crate::claude_ide::client_label(&c))
+        .unwrap_or_else(|| format!("client {target}"));
+    editor.set_status(match lines {
+        Some((start, end)) if start == end => {
+            format!("Mentioned @{name}#L{} in {who}", start + 1)
+        }
+        Some((start, end)) => format!("Mentioned @{name}#L{}-{} in {who}", start + 1, end + 1),
+        None => format!("Mentioned @{name} in {who}"),
+    });
+    Ok(())
+}
+
+fn claude_mention(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let session = cx
+        .editor
+        .claude_ide
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
+    let clients = session.clients();
+    if clients.is_empty() {
+        anyhow::bail!("no Claude Code client is connected (run `claude --ide` or `/ide`)");
+    }
+    let (view, doc) = current_ref!(cx.editor);
+    let path = doc
+        .path()
+        .ok_or_else(|| anyhow::anyhow!("current buffer has no file path"))?
+        .to_path_buf();
+    let lines = crate::handlers::claude_ide::selection_info(doc, view.id)
+        .and_then(|info| info.line_span());
+    let name = doc.display_name().to_string();
+
+    // T8 §2: explicit argument, else the focused / only client; with several
+    // clients and no focus ask instead of guessing.
+    let target = match args.first() {
+        Some(arg) => Some(session.handler.resolve_client_arg(arg)?),
+        None if session.handler.focus().is_some() || clients.len() == 1 => {
+            session.handler.active_client()
+        }
+        None => None,
+    };
+    match target {
+        Some(target) => claude_send_mention(cx.editor, &session, target, &path, lines, &name),
+        None => {
+            claude_client_picker(cx, clients, move |cx, client| {
+                if let Some(session) = cx.editor.claude_ide.clone() {
+                    if let Err(e) =
+                        claude_send_mention(cx.editor, &session, client.id, &path, lines, &name)
+                    {
+                        cx.editor.set_error(e.to_string());
+                    }
+                }
+            });
+            Ok(())
+        }
+    }
 }
 
 fn claude_diff_accept(
@@ -3193,41 +3464,6 @@ fn claude_diff_reject(
         "Rejected Claude Code proposal for {}",
         helix_stdx::path::get_relative_path(&diff.path).display()
     ));
-    Ok(())
-}
-
-fn claude_mention(
-    cx: &mut compositor::Context,
-    _args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-    let session = cx
-        .editor
-        .claude_ide
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("Claude IDE server is not running"))?;
-    if !session.is_connected() {
-        anyhow::bail!("no Claude Code client is connected (run `claude --ide` or `/ide`)");
-    }
-    let (view, doc) = current_ref!(cx.editor);
-    let path = doc
-        .path()
-        .ok_or_else(|| anyhow::anyhow!("current buffer has no file path"))?
-        .to_path_buf();
-    let lines = crate::handlers::claude_ide::selection_info(doc, view.id)
-        .and_then(|info| info.line_span());
-    if !session.handler.mention(&path, lines) {
-        anyhow::bail!("failed to send the mention to Claude Code");
-    }
-    let name = doc.display_name();
-    cx.editor.set_status(match lines {
-        Some((start, end)) if start == end => format!("Mentioned @{name}#L{}", start + 1),
-        Some((start, end)) => format!("Mentioned @{name}#L{}-{}", start + 1, end + 1),
-        None => format!("Mentioned @{name}"),
-    });
     Ok(())
 }
 
@@ -4624,11 +4860,33 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "claude-mention",
         aliases: &[],
-        doc: "Insert the current file (and selected lines) as an @-mention into the connected Claude Code prompt.",
+        doc: "Insert the current file (and selected lines) as an @-mention into a Claude Code prompt: claude-mention [pid|#N]. Without an argument the focused client is used; with several clients and no focus a picker opens.",
         fun: claude_mention,
         completer: CommandCompleter::none(),
         signature: Signature {
-            positionals: (0, Some(0)),
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-ide-focus",
+        aliases: &[],
+        doc: "Choose which connected Claude Code CLI :claude-mention addresses: claude-ide-focus [pid|#N|none]. Without an argument a picker opens.",
+        fun: claude_ide_focus,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-ide-disconnect",
+        aliases: &[],
+        doc: "Close one Claude Code CLI connection: claude-ide-disconnect <pid|#N>. Its pending proposals are rejected; the CLI will try to reconnect a few times on its own.",
+        fun: claude_ide_disconnect,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
             ..Signature::DEFAULT
         },
     },
@@ -4657,7 +4915,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "claude-ide-status",
         aliases: &[],
-        doc: "Show the Claude Code IDE server port, lock file, connection state and pending diffs.",
+        doc: "Show the Claude Code IDE server port, lock file and connected CLIs (pid, permission mode, pending diffs, focus).",
         fun: claude_ide_status,
         completer: CommandCompleter::none(),
         signature: Signature {

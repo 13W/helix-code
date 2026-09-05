@@ -28,10 +28,32 @@ IDE — all checks are interactive. Start the CLI **inside** the workspace.
 | 13 | Answer the CLI's terminal prompt instead of Helix | CLI sends `close_tab`; the Helix prompt/split disappears |
 | 14 | `hx --mcp --claude-ide` | both `helix-mcp: MCP server listening at http://…/mcp` and the IDE server line; both work at once |
 | 15 | Second Helix in another workspace, `claude --ide` in the first workspace | only the matching Helix gets `client #1 connected` (observed); the other one appears in `/ide` under "Found N other running IDE(s)" per PROTO §1.3 (not driven visually) |
-| 16 | Second `claude --ide` in the same workspace | Helix log: `disconnecting previous WebSocket client`; the two CLIs then evict each other for a few seconds because the CLI auto-reconnects — run one CLI per workspace |
+| 16 | Second `claude --ide` in the same workspace | Both CLIs stay connected (T8): Helix log `client #2 connected (2 of 4)`, no eviction, no `attempting automatic reconnection` in either CLI's debug log; `/ide` shows Connected in both |
 | 17 | `:q!` in Helix | lock file removed; the CLI reports the IDE as disconnected |
 | 18 | `kill -9` Helix | lock file stays (observed with the example server); the CLI removes it on its next scan via the pid probe (PROTO §1.3, not observed) |
 
+## T8 — several CLIs on one Helix
+
+Setup as above, `diff-mode = "prompt"` unless stated; two terminals A and B in
+the same workspace, both `claude --ide --permission-mode default --debug-file <path>`.
+Status: **not yet executed against the real CLI** — the "Expected" column is
+the specified behaviour, covered by the automated tests listed below; replace
+this note with the observed results once the live run is done.
+
+| # | Step | Expected |
+|---|---|---|
+| 19 | Start A and B | both show Connected in `/ide`; `:claude-ide-status` lists two rows with different pids, permission mode `default`, statusline `✻◆2`; neither debug log contains `attempting automatic reconnection` |
+| 20 | In A ask for an edit; do not answer. In B ask for an edit | prompt "Claude Code (pid A) proposes changes to …"; B's prompt waits in the queue (`:claude-ide-status` shows `diffs 1` for each) |
+| 21 | Apply A's prompt | A writes the file; B's prompt appears with "(pid B)" |
+| 22 | Start a new turn in A (it sends `closeAllDiffTabs`) | B's prompt stays; A's debug log shows `CLOSED_0_DIFF_TABS` |
+| 23 | `:claude-mention` with two CLIs and no focus | picker with `client / pid / mode / cwd`; choosing B inserts `@file#L…` into B only |
+| 24 | `:claude-ide-focus <pid A>` then `:claude-mention` | mention goes to A without a picker; `:claude-ide-status` marks A with `●` |
+| 25 | `max-clients = 2` in config, start a third and a fourth `claude --ide` | Helix log `refusing WebSocket client 127.0.0.1:… too many clients (max-clients = 2)`; the CLIs show the IDE as failed/unavailable after their retries; the first two are unaffected |
+| 26 | `diff-mode = "split"`, edits from A and B on two different files | two splits side by side, right buffers `✻ <file> [<pid A>]` and `✻ <file> [<pid B>]`; `:claude-diff-accept` in one leaves the other pending |
+| 27 | `/exit` in A while B has a pending proposal | A's proposals rejected (`DIFF_REJECTED`), B untouched, statusline `✻◆` |
+| 28 | `:claude-ide-disconnect <pid B>` | B's socket closed with 1000 "Closed by user"; B reconnects on its own within seconds (expected, PROTO §2.6 as observed) |
+
 Automated equivalents: `cargo test -p helix-claude-ide`,
 `cargo test -p helix-term --features integration --test claude_ide_integration`,
-`cargo test -p helix-term --features integration --test claude_ide_split`.
+`cargo test -p helix-term --features integration --test claude_ide_split`,
+`cargo test -p helix-term --features integration --test claude_ide_multi`.

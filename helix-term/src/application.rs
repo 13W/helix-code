@@ -82,7 +82,8 @@ pub struct Application {
 
     mcp_rx: Option<tokio::sync::mpsc::Receiver<helix_mcp::McpCommand>>,
     /// `tab_name` of the Claude Code diff proposal currently on screen.
-    claude_diff_shown: Option<String>,
+    /// `(client id, tab_name)` of the prompt-mode proposal currently on screen.
+    claude_diff_shown: Option<(u64, String)>,
 }
 
 
@@ -802,6 +803,7 @@ impl Application {
     /// closing the right buffer, or `close_tab` from the CLI.
     fn claude_open_diff_split(
         &mut self,
+        client: helix_claude_ide::ClientInfo,
         old_path: std::path::PathBuf,
         new_path: std::path::PathBuf,
         new_contents: String,
@@ -815,8 +817,8 @@ impl Application {
                 let _ = tx.send(helix_mcp::DiffOutcome::Rejected);
             }
         };
-        if editor.claude_diff_view_for_tab(&tab_name).is_some() {
-            Self::claude_close_diff_split(editor, &tab_name);
+        if editor.claude_diff_view_for_tab(client.id, &tab_name).is_some() {
+            Self::claude_close_diff_split(editor, client.id, &tab_name);
         }
 
         let old = std::fs::read_to_string(&old_path).unwrap_or_default();
@@ -854,22 +856,34 @@ impl Application {
             (was_readonly, previous)
         };
 
-        // Right side: the proposal, named after the target file so syntax
-        // highlighting and the buffer name make sense, but never written to
-        // that path (the CLI writes the real file after FILE_SAVED).
+        // Right side: the proposal, named after the target file (plus the
+        // CLI pid, T8) so the buffer name makes sense, but never written to
+        // that path (the CLI writes the real file after FILE_SAVED). The
+        // language comes from the *target* path: the `[pid]` suffix would
+        // defeat extension-based detection.
         let mut right_doc = helix_view::Document::from(
             helix_core::Rope::from(new_contents.as_str()),
             None,
             editor.config.clone(),
             editor.syn_loader.clone(),
         );
-        right_doc.set_path(Some(&Self::claude_proposal_path(&new_path)));
-        right_doc.detect_language(&editor.syn_loader.load());
+        right_doc.set_path(Some(&Self::claude_proposal_path(
+            &new_path,
+            &client.short_label(),
+        )));
+        {
+            let loader = editor.syn_loader.load();
+            let language = loader
+                .language_for_filename(&new_path)
+                .map(|lang| loader.language(lang).config().clone());
+            right_doc.set_language(language, &loader);
+        }
         let right = editor.new_file_from_document(Action::VerticalSplit, right_doc);
         let right_view = editor.tree.focus;
         doc_mut!(editor, &right).set_diff_base(old.into_bytes());
 
         editor.claude_diff_views.push(ClaudeDiffView {
+            client,
             tab_name,
             path: new_path.clone(),
             left,
@@ -881,29 +895,40 @@ impl Application {
             reply,
         });
         editor.set_status(format!(
-            "Claude Code proposal for {}: :claude-diff-accept / :claude-diff-reject (or :w / :bc on the right buffer)",
+            "Claude Code ({}) proposal for {}: :claude-diff-accept / :claude-diff-reject (or :w / :bc on the right buffer)",
+            client.label(),
             helix_stdx::path::get_relative_path(&new_path).display()
         ));
     }
 
-    /// Path shown for the right-hand proposal buffer: `<dir>/✻ <file>` keeps
-    /// the extension (syntax highlighting) and cannot collide with the real file.
-    pub fn claude_proposal_path(path: &std::path::Path) -> std::path::PathBuf {
+    /// Whether a compositor layer with `id` (e.g. a picker) is currently open.
+    pub fn has_layer(&self, id: &'static str) -> bool {
+        self.compositor.contains(id)
+    }
+
+    /// Path shown for the right-hand proposal buffer: `<dir>/✻ <file> [<label>]`
+    /// (label = CLI pid, or `#N` before the pid is known) cannot collide with
+    /// the real file and tells proposals of several CLIs apart (T8).
+    pub fn claude_proposal_path(path: &std::path::Path, label: &str) -> std::path::PathBuf {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "proposal".to_string());
-        path.with_file_name(format!("\u{273B} {name}"))
+        path.with_file_name(format!("\u{273B} {name} [{label}]"))
     }
 
     /// Tear down a split proposal: restore the left document, close the
     /// proposal buffer and the views the proposal opened. Does not decide the
     /// outcome — callers resolve `reply` first.
-    pub fn claude_close_diff_split(editor: &mut helix_view::Editor, tab_name: &str) {
+    pub fn claude_close_diff_split(
+        editor: &mut helix_view::Editor,
+        client_id: u64,
+        tab_name: &str,
+    ) {
         let Some(idx) = editor
             .claude_diff_views
             .iter()
-            .position(|v| v.tab_name == tab_name)
+            .position(|v| v.client.id == client_id && v.tab_name == tab_name)
         else {
             return;
         };
@@ -1225,6 +1250,7 @@ impl Application {
             // ── Claude Code IDE: diff proposals (prompt mode) ───────────────
 
             McpCommand::OpenDiff {
+                client,
                 old_path,
                 new_path,
                 new_contents,
@@ -1232,10 +1258,22 @@ impl Application {
                 reply,
             } => {
                 use crate::ui::PromptEvent;
-                if self.editor.config().claude_ide.diff_mode
-                    == helix_view::editor::ClaudeIdeDiffMode::Split
-                {
-                    self.claude_open_diff_split(old_path, new_path, new_contents, tab_name, reply);
+                let split_mode = self.editor.config().claude_ide.diff_mode
+                    == helix_view::editor::ClaudeIdeDiffMode::Split;
+                // Splits coexist, prompts queue (T8 §2); keep the handler in
+                // step with the current `diff-mode`.
+                if let Some(session) = &self.editor.claude_ide {
+                    session.handler.set_exclusive_display(!split_mode);
+                }
+                if split_mode {
+                    self.claude_open_diff_split(
+                        client,
+                        old_path,
+                        new_path,
+                        new_contents,
+                        tab_name,
+                        reply,
+                    );
                     return;
                 }
                 // PROTO §5.1: the left side is the file on disk, or empty for a new file.
@@ -1243,14 +1281,15 @@ impl Application {
                 let diff = Self::mcp_unified_diff(&old, &new_contents, &new_path);
                 let preview = Self::claude_diff_preview(&diff);
                 let shown_path = helix_stdx::path::get_relative_path(&new_path);
+                let who = client.label();
                 let message = if old_path.exists() {
                     format!(
-                        "Claude Code proposes changes to {}\n\n{preview}",
+                        "Claude Code ({who}) proposes changes to {}\n\n{preview}",
                         shown_path.display()
                     )
                 } else {
                     format!(
-                        "Claude Code proposes to create {}\n\n{preview}",
+                        "Claude Code ({who}) proposes to create {}\n\n{preview}",
                         shown_path.display()
                     )
                 };
@@ -1283,16 +1322,28 @@ impl Application {
                 .no_auto_close()
                 .with_id(CLAUDE_DIFF_ID);
                 self.compositor.replace_or_push(CLAUDE_DIFF_ID, select);
-                self.claude_diff_shown = Some(tab_name);
+                self.claude_diff_shown = Some((client.id, tab_name));
             }
 
-            McpCommand::CloseDiff { tab_name, reply } => {
-                if self.claude_diff_shown.as_deref() == Some(tab_name.as_str()) {
+            McpCommand::CloseDiff {
+                client,
+                tab_name,
+                reply,
+            } => {
+                let shown = self
+                    .claude_diff_shown
+                    .as_ref()
+                    .is_some_and(|(id, tab)| *id == client.id && *tab == tab_name);
+                if shown {
                     self.compositor.remove(CLAUDE_DIFF_ID);
                     self.claude_diff_shown = None;
                 }
-                if self.editor.claude_diff_view_for_tab(&tab_name).is_some() {
-                    Self::claude_close_diff_split(&mut self.editor, &tab_name);
+                if self
+                    .editor
+                    .claude_diff_view_for_tab(client.id, &tab_name)
+                    .is_some()
+                {
+                    Self::claude_close_diff_split(&mut self.editor, client.id, &tab_name);
                 }
                 let _ = reply.send(());
             }
