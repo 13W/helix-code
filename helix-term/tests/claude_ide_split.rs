@@ -248,6 +248,137 @@ async fn proposal_opens_as_split_and_close_tab_tears_it_down() -> anyhow::Result
     assert!(!app.editor.documents.contains_key(&view.right));
     assert!(!new_file.exists());
 
+    // ── T6b: decisions from the editor ────────────────────────────────────
+
+    let open = |id: u64, tab: &str, contents: &str| {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"openDiff","arguments":{
+            "old_file_path": file_path.to_string_lossy(),
+            "new_file_path": file_path.to_string_lossy(),
+            "new_file_contents": contents,
+            "tab_name": tab,
+        }}})
+        .to_string()
+    };
+    let disk_before = std::fs::read_to_string(&file_path)?;
+
+    // (a) :claude-diff-accept with an edited proposal → FILE_SAVED + edited text.
+    ws.send(Message::Text(
+        open(10, "accept-me", "fn main() {}\nfn a() {}\n").into(),
+    ))
+    .await?;
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    })
+    .await?;
+    assert_eq!(app.editor.claude_diff_views.len(), 1);
+    {
+        use helix_core::{Selection, Transaction};
+        let (view, doc) = helix_view::current!(app.editor);
+        let end = doc.text().len_chars();
+        let tx = Transaction::insert(doc.text(), &Selection::point(end), "// edited\n".into());
+        doc.apply(&tx, view.id);
+        assert!(doc.is_modified());
+    }
+    let reply = with_keys_loop(
+        &mut app,
+        ":claude-diff-accept<ret>",
+        wait_response(&mut ws, &mut inbox, 10),
+    )
+    .await?;
+    assert_eq!(reply["result"]["content"][0]["text"], "FILE_SAVED");
+    assert_eq!(
+        reply["result"]["content"][1]["text"],
+        "fn main() {}\nfn a() {}\n// edited\n"
+    );
+    assert!(app.editor.claude_diff_views.is_empty());
+    assert_eq!(app.editor.tree.views().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&file_path)?,
+        disk_before,
+        "Helix never writes"
+    );
+
+    // (b) :w in the proposal buffer → FILE_SAVED with the proposal as is.
+    ws.send(Message::Text(
+        open(11, "write-me", "fn main() {}\nfn b() {}\n").into(),
+    ))
+    .await?;
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    })
+    .await?;
+    let right = app.editor.claude_diff_views[0].right;
+    let reply = with_keys_loop(&mut app, ":w<ret>", wait_response(&mut ws, &mut inbox, 11)).await?;
+    assert_eq!(reply["result"]["content"][0]["text"], "FILE_SAVED");
+    assert_eq!(
+        reply["result"]["content"][1]["text"],
+        "fn main() {}\nfn b() {}\n"
+    );
+    assert!(app.editor.claude_diff_views.is_empty());
+    assert!(!app.editor.documents.contains_key(&right));
+    assert!(
+        !file_path
+            .with_file_name(
+                "\u{273B} ".to_string() + file_path.file_name().unwrap().to_str().unwrap()
+            )
+            .exists(),
+        ":w must not create the proposal file"
+    );
+    assert_eq!(std::fs::read_to_string(&file_path)?, disk_before);
+
+    // (c) :bc on the proposal buffer → DIFF_REJECTED.
+    ws.send(Message::Text(
+        open(12, "close-me", "fn main() {}\nfn c() {}\n").into(),
+    ))
+    .await?;
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    })
+    .await?;
+    let reply =
+        with_keys_loop(&mut app, ":bc<ret>", wait_response(&mut ws, &mut inbox, 12)).await?;
+    assert_eq!(reply["result"]["content"][0]["text"], "DIFF_REJECTED");
+    assert_eq!(reply["result"]["content"][1]["text"], "close-me");
+    with_loop(&mut app, async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(())
+    })
+    .await?;
+    assert!(app.editor.claude_diff_views.is_empty());
+    assert_eq!(app.editor.tree.views().count(), 1);
+    assert_eq!(std::fs::read_to_string(&file_path)?, disk_before);
+    assert_eq!(session.handler.pending_diff_count(), 0);
+
     app.close().await;
     Ok(())
+}
+
+/// Like `with_loop`, but first feeds `keys` (macro syntax) to the editor.
+async fn with_keys_loop<T>(
+    app: &mut helix_term::application::Application,
+    keys: &str,
+    future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    use crossterm::event::{Event, KeyEvent};
+    use helix_view::input::parse_macro;
+    #[cfg(not(windows))]
+    use termina::event::{Event, KeyEvent};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut rx_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+    for key in parse_macro(keys)? {
+        tx.send(Ok(Event::Key(KeyEvent::from(key))))?;
+    }
+    tokio::select! {
+        result = future => result,
+        _ = async {
+            loop {
+                app.event_loop_until_idle(&mut rx_stream).await;
+                tokio::task::yield_now().await;
+            }
+        } => unreachable!(),
+    }
 }

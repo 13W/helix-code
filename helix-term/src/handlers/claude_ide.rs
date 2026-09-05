@@ -4,7 +4,7 @@
 use helix_claude_ide::notify::{Position, SelectionInfo};
 use helix_core::RopeSlice;
 use helix_event::register_hook;
-use helix_view::events::{DocumentFocusLost, SelectionDidChange};
+use helix_view::events::{DocumentDidClose, DocumentFocusLost, SelectionDidChange};
 use helix_view::{Document, Editor, ViewId};
 
 use crate::handlers::Handlers;
@@ -18,6 +18,29 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
                 }
             }
         }
+        Ok(())
+    });
+
+    // Closing the proposal *buffer* (`:bc`, not `:q`, which only closes a
+    // window) without a decision rejects the proposal (PROTO §5.3, "tab closed").
+    register_hook!(move |event: &mut DocumentDidClose<'_>| {
+        let closed = event.doc.id();
+        let editor: &mut Editor = event.editor;
+        let Some(diff) = editor
+            .claude_diff_view_for_doc(closed)
+            .filter(|v| v.right == closed)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if let Some(tx) = diff.reply.lock().unwrap().take() {
+            let _ = tx.send(helix_mcp::DiffOutcome::Rejected);
+        }
+        // Tear the rest down outside of `close_document`.
+        let tab_name = diff.tab_name.clone();
+        crate::job::dispatch_blocking(move |editor, _| {
+            crate::application::Application::claude_close_diff_split(editor, &tab_name);
+        });
         Ok(())
     });
 

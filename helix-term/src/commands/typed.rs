@@ -382,6 +382,22 @@ fn write_impl(
     path: Option<&str>,
     options: WriteOptions,
 ) -> anyhow::Result<()> {
+    // `:w` on a Claude Code proposal buffer accepts the proposal (PROTO §5.3,
+    // `onWillSaveTextDocument`); the CLI writes the real file afterwards.
+    {
+        let current = doc!(cx.editor).id();
+        if let Some(diff) =
+            crate::claude_ide::split_for_doc(cx.editor, current).filter(|v| v.right == current)
+        {
+            crate::claude_ide::accept_split(cx.editor, &diff)?;
+            cx.editor.set_status(format!(
+                "Accepted Claude Code proposal for {}",
+                helix_stdx::path::get_relative_path(&diff.path).display()
+            ));
+            return Ok(());
+        }
+    }
+
     let config = cx.editor.config();
     let (view, doc) = current!(cx.editor);
     let doc_id = doc.id();
@@ -873,6 +889,10 @@ pub fn write_all_impl(
         .filter_map(|id| {
             let doc = doc!(cx.editor, &id);
             if !doc.is_modified() {
+                return None;
+            }
+            // Claude Code proposal buffers are decided with :claude-diff-accept, never written.
+            if crate::claude_ide::split_for_doc(cx.editor, id).is_some_and(|v| v.right == id) {
                 return None;
             }
             if doc.path().is_none() {
@@ -3142,6 +3162,40 @@ fn claude_ide_status(
     Ok(())
 }
 
+fn claude_diff_accept(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let diff = crate::claude_ide::current_split(cx.editor)?;
+    crate::claude_ide::accept_split(cx.editor, &diff)?;
+    cx.editor.set_status(format!(
+        "Accepted Claude Code proposal for {}",
+        helix_stdx::path::get_relative_path(&diff.path).display()
+    ));
+    Ok(())
+}
+
+fn claude_diff_reject(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let diff = crate::claude_ide::current_split(cx.editor)?;
+    crate::claude_ide::reject_split(cx.editor, &diff);
+    cx.editor.set_status(format!(
+        "Rejected Claude Code proposal for {}",
+        helix_stdx::path::get_relative_path(&diff.path).display()
+    ));
+    Ok(())
+}
+
 fn claude_mention(
     cx: &mut compositor::Context,
     _args: Args,
@@ -4572,6 +4626,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Insert the current file (and selected lines) as an @-mention into the connected Claude Code prompt.",
         fun: claude_mention,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-diff-accept",
+        aliases: &["cda"],
+        doc: "Accept the Claude Code proposal shown as a split, with the current contents of the proposal buffer. Same as :w in that buffer; closing it with :bc rejects it.",
+        fun: claude_diff_accept,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "claude-diff-reject",
+        aliases: &["cdr"],
+        doc: "Reject the Claude Code proposal shown as a split and close it.",
+        fun: claude_diff_reject,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),
