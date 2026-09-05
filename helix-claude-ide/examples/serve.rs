@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use helix_claude_ide::{Config, Notifier, ToolHandler, ToolResult};
+use helix_claude_ide::{ClientId, Config, Notifier, ToolHandler, ToolResult};
 
 struct StderrLogger;
 
@@ -35,8 +35,13 @@ struct LoggingHandler;
 
 #[async_trait]
 impl ToolHandler for LoggingHandler {
-    async fn call(&self, name: &str, arguments: Value) -> anyhow::Result<ToolResult> {
-        eprintln!("[tools/call] {name} {arguments}");
+    async fn call(
+        &self,
+        client: ClientId,
+        name: &str,
+        arguments: Value,
+    ) -> anyhow::Result<ToolResult> {
+        eprintln!("[tools/call {client}] {name} {arguments}");
         Ok(match name {
             "closeAllDiffTabs" => ToolResult::text("CLOSED_0_DIFF_TABS"),
             "close_tab" => ToolResult::text("TAB_CLOSED"),
@@ -45,12 +50,12 @@ impl ToolHandler for LoggingHandler {
         })
     }
 
-    fn on_client_connected(&self, notifier: Notifier) {
-        eprintln!("[client connected] {notifier:?}");
+    fn on_client_connected(&self, client: ClientId, notifier: Notifier) {
+        eprintln!("[client connected] {client} {notifier:?}");
     }
 
-    fn on_client_disconnected(&self) {
-        eprintln!("[client disconnected]");
+    fn on_client_disconnected(&self, client: ClientId) {
+        eprintln!("[client disconnected] {client}");
     }
 }
 

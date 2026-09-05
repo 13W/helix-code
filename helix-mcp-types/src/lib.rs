@@ -147,6 +147,33 @@ pub struct DiagnosticItem {
     pub code: Option<String>,
 }
 
+/// The Claude Code CLI connection a diff proposal belongs to (T8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClientInfo {
+    /// Sequential connection number assigned by the IDE server (`#N`).
+    pub id: u64,
+    /// Process id reported by the CLI in `ide_connected`, once known.
+    pub pid: Option<u32>,
+}
+
+impl ClientInfo {
+    /// `pid 72464` when the pid is known, `#N` otherwise — for titles and buffer names.
+    pub fn label(&self) -> String {
+        match self.pid {
+            Some(pid) => format!("pid {pid}"),
+            None => format!("#{}", self.id),
+        }
+    }
+
+    /// Short form for buffer names: `72464` or `#N`.
+    pub fn short_label(&self) -> String {
+        match self.pid {
+            Some(pid) => pid.to_string(),
+            None => format!("#{}", self.id),
+        }
+    }
+}
+
 /// Outcome of a Claude Code `openDiff` proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffOutcome {
@@ -386,6 +413,8 @@ pub enum McpCommand {
     /// exist) and let the user accept or reject it. `reply` is shared with the
     /// Claude IDE registry; whoever takes the sender first decides.
     OpenDiff {
+        /// Which CLI connection proposes the change.
+        client: ClientInfo,
         old_path: PathBuf,
         new_path: PathBuf,
         new_contents: String,
@@ -396,6 +425,9 @@ pub enum McpCommand {
     /// disconnect): dismiss its UI if it is currently displayed. The outcome
     /// has already been decided by the registry.
     CloseDiff {
+        /// Which CLI connection the proposal belonged to (`tab_name` is only
+        /// unique per client).
+        client: ClientInfo,
         tab_name: String,
         reply: oneshot::Sender<()>,
     },

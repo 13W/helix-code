@@ -160,7 +160,7 @@ The following statusline elements can be configured:
 | `version-control` | The current branch name or detached commit hash of the opened workspace |
 | `register` | The current selected register |
 | `code-action-hint` | Indicator for when code actions are available |
-| `claude-ide-indicator` | `✻` while the Claude Code IDE server is running, `✻◆` once a `claude` CLI is connected |
+| `claude-ide-indicator` | `✻` while the Claude Code IDE server is running, `✻◆` once a `claude` CLI is connected, `✻◆N` with N CLIs connected |
 
 ### `[editor.lsp]` Section
 
@@ -473,19 +473,22 @@ Helix as its editor — review proposed edits, receive LSP diagnostics and see
 the current selection. The server can also be started per launch with `--claude-ide`
 (and `--claude-ide-port`, `--claude-ide-name`) or at runtime with
 `:claude-ide-start`; `:claude-ide-status` and `:claude-ide-stop` inspect and
-stop it. `:claude-mention` inserts the current file (with the selected line
-range, e.g. `@src/main.rs#L10-15`) into the connected CLI's prompt.
+stop it. `:claude-mention [pid|#N]` inserts the current file (with the selected
+line range, e.g. `@src/main.rs#L10-15`) into a connected CLI's prompt;
+`:claude-ide-focus` chooses the default target and `:claude-ide-disconnect`
+closes one connection.
 
 | Key | Description | Default |
 |---|---|---|
 | `enable` | Start the IDE server when Helix starts. | `false` |
 | `name` | Name shown in the CLI's `/ide` picker. Empty means the workspace directory name. | `""` |
 | `notify-selection` | Send the current selection to the connected CLI (shown as "N lines selected"). | `true` |
-| `diff-mode` | How proposed edits are reviewed: `prompt` (Apply / Reject dialog with a diff preview) or `split` (the file on the left, the editable proposal `✻ <file>` on the right; `:claude-diff-accept` / `:w` in the proposal buffer accept it with its current contents, `:claude-diff-reject` / `:bc` reject it, `:q` only closes a window and keeps the proposal pending). Helix never writes the file itself: the CLI does after an accepted proposal. | `prompt` |
+| `diff-mode` | How proposed edits are reviewed: `prompt` (Apply / Reject dialog with a diff preview) or `split` (the file on the left, the editable proposal `✻ <file> [<pid>]` on the right; `:claude-diff-accept` / `:w` in the proposal buffer accept it with its current contents, `:claude-diff-reject` / `:bc` reject it, `:q` only closes a window and keeps the proposal pending). Helix never writes the file itself: the CLI does after an accepted proposal. | `prompt` |
+| `max-clients` | How many `claude` CLIs may be connected at the same time; further connections are refused with HTTP 503 (the CLI gives up after a few retries). Must be at least 1. | `4` |
 
-Only one CLI can be connected at a time and the CLI does not reconnect on its
-own; the CLI's working directory must be the workspace root or a directory
-below it, otherwise `/ide` does not list the editor.
+The CLI's working directory must be the workspace root or a directory below
+it, otherwise `/ide` does not list the editor. The CLI reconnects on its own
+after a lost connection.
 
 ### `[editor.smart-tab]` Section
 

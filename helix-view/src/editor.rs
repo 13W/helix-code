@@ -74,6 +74,21 @@ where
     Ok(Duration::from_millis(millis))
 }
 
+/// `[editor.claude-ide] max-clients`: at least one (a limit of zero would
+/// refuse every CLI; negative values are already rejected by the type).
+fn deserialize_max_clients<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let max = usize::deserialize(deserializer)?;
+    if max == 0 {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "claude-ide.max-clients must be at least 1",
+        ));
+    }
+    Ok(max)
+}
+
 fn serialize_duration_millis<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -593,6 +608,9 @@ pub enum ClaudeIdeDiffMode {
 /// the proposal on the right. Accepting or rejecting resolves `reply`.
 #[derive(Clone)]
 pub struct ClaudeDiffView {
+    /// The CLI connection the proposal came from; `tab_name` is only unique
+    /// per client (T8).
+    pub client: helix_claude_ide::ClientInfo,
     /// `tab_name` given by the CLI, used by `close_tab`.
     pub tab_name: String,
     /// The file the proposal targets.
@@ -614,6 +632,7 @@ pub struct ClaudeDiffView {
 impl std::fmt::Debug for ClaudeDiffView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaudeDiffView")
+            .field("client", &self.client)
             .field("tab_name", &self.tab_name)
             .field("path", &self.path)
             .field("left", &self.left)
@@ -635,6 +654,10 @@ pub struct ClaudeIdeConfig {
     pub notify_selection: bool,
     /// How `openDiff` proposals are shown.
     pub diff_mode: ClaudeIdeDiffMode,
+    /// How many `claude` CLIs may be connected at once; further connections
+    /// are refused with HTTP 503 (the CLI gives up after its retries).
+    #[serde(deserialize_with = "deserialize_max_clients")]
+    pub max_clients: usize,
 }
 
 impl Default for ClaudeIdeConfig {
@@ -644,6 +667,7 @@ impl Default for ClaudeIdeConfig {
             name: String::new(),
             notify_selection: true,
             diff_mode: ClaudeIdeDiffMode::Prompt,
+            max_clients: helix_claude_ide::DEFAULT_MAX_CLIENTS,
         }
     }
 }
@@ -2237,9 +2261,11 @@ impl Editor {
             .find(|v| v.right == doc_id || v.left == doc_id)
     }
 
-    /// Claude Code split proposal shown for `tab_name`.
-    pub fn claude_diff_view_for_tab(&self, tab_name: &str) -> Option<&ClaudeDiffView> {
-        self.claude_diff_views.iter().find(|v| v.tab_name == tab_name)
+    /// Claude Code split proposal shown for `tab_name` of client `client_id`.
+    pub fn claude_diff_view_for_tab(&self, client_id: u64, tab_name: &str) -> Option<&ClaudeDiffView> {
+        self.claude_diff_views
+            .iter()
+            .find(|v| v.client.id == client_id && v.tab_name == tab_name)
     }
 
     pub fn close_document(&mut self, doc_id: DocumentId, force: bool) -> Result<(), CloseError> {

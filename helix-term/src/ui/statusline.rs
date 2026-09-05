@@ -598,16 +598,17 @@ where
     }
 }
 
-/// Claude Code IDE server: `✻` while the server runs, `✻◆` once a CLI is connected.
+/// Claude Code IDE server: `✻` while the server runs, `✻◆` with one CLI
+/// connected, `✻◆N` with N ≥ 2 (T8).
 fn render_claude_ide_indicator<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
     if let Some(session) = &context.editor.claude_ide {
-        let text = if session.is_connected() {
-            " \u{273B}\u{25C6} "
-        } else {
-            " \u{273B} "
+        let text = match session.client_count() {
+            0 => " \u{273B} ".to_string(),
+            1 => " \u{273B}\u{25C6} ".to_string(),
+            n => format!(" \u{273B}\u{25C6}{n} "),
         };
         write(context, text.into());
     }

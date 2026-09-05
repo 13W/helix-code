@@ -1,6 +1,7 @@
 //! IDE → CLI notifications (PROTO §6): `selection_changed` with the
-//! extension's 300 ms trailing debounce and de-duplication, the 500 ms
-//! replay after a client connects (§3.5), and `at_mentioned`.
+//! extension's 300 ms trailing debounce and de-duplication (broadcast to
+//! every client, T8), the 500 ms replay after a client connects (§3.5, one
+//! timer per connection), and `at_mentioned` (addressed to one client).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -81,12 +82,11 @@ pub fn at_mentioned_params(path: &Path, lines: Option<(usize, usize)>) -> Value 
     params
 }
 
-/// Sends one notification; returns `false` when no client is connected.
+/// Sends one notification; returns `false` when no client received it.
 pub type SendFn = Arc<dyn Fn(&str, Value) -> bool + Send + Sync>;
 
 enum Event {
     Changed(SelectionInfo),
-    Replay(Duration),
 }
 
 /// Debounced, de-duplicated `selection_changed` sender.
@@ -97,6 +97,8 @@ enum Event {
 pub struct SelectionTracker {
     tx: mpsc::UnboundedSender<Event>,
     latest: Arc<Mutex<Option<SelectionInfo>>>,
+    /// When the debouncer last broadcast a frame successfully.
+    last_sent_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl SelectionTracker {
@@ -108,8 +110,13 @@ impl SelectionTracker {
     pub fn spawn_with(send: SendFn, debounce: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let latest = Arc::new(Mutex::new(None));
-        tokio::spawn(run(rx, send, debounce, Arc::clone(&latest)));
-        SelectionTracker { tx, latest }
+        let last_sent_at = Arc::new(Mutex::new(None));
+        tokio::spawn(run(rx, send, debounce, Arc::clone(&last_sent_at)));
+        SelectionTracker {
+            tx,
+            latest,
+            last_sent_at,
+        }
     }
 
     /// Record a new selection; a frame is sent after the debounce if it
@@ -119,9 +126,29 @@ impl SelectionTracker {
         let _ = self.tx.send(Event::Changed(info));
     }
 
-    /// Re-send the cached selection after `delay` (new client connected).
-    pub fn replay_after(&self, delay: Duration) {
-        let _ = self.tx.send(Event::Replay(delay));
+    /// Send the cached selection to `send` after `delay` — the PROTO §3.5
+    /// replay for a freshly connected client. Independent of the debouncer:
+    /// other clients see nothing, and de-duplication state is untouched.
+    /// Skipped when a broadcast already went out after this call (the new
+    /// client received the current selection with everybody else).
+    pub fn replay_to(&self, delay: Duration, send: SendFn) {
+        let latest = Arc::clone(&self.latest);
+        let last_sent_at = Arc::clone(&self.last_sent_at);
+        let connected_at = Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let broadcast_since = last_sent_at
+                .lock()
+                .unwrap()
+                .is_some_and(|at| at > connected_at);
+            if broadcast_since {
+                return;
+            }
+            let cached = latest.lock().unwrap().clone();
+            if let Some(info) = cached {
+                send(SELECTION_CHANGED, info.params());
+            }
+        });
     }
 
     pub fn latest(&self) -> Option<SelectionInfo> {
@@ -133,7 +160,7 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Event>,
     send: SendFn,
     debounce: Duration,
-    latest: Arc<Mutex<Option<SelectionInfo>>>,
+    last_sent_at: Arc<Mutex<Option<Instant>>>,
 ) {
     let mut last_sent: Option<SelectionInfo> = None;
     let mut pending: Option<SelectionInfo> = None;
@@ -158,21 +185,13 @@ async fn run(
                         deadline = Some(Instant::now() + debounce);
                     }
                 }
-                Some(Event::Replay(delay)) => {
-                    // A new client knows nothing yet; the cache is re-sent as is.
-                    last_sent = None;
-                    let cached = latest.lock().unwrap().clone();
-                    if let Some(info) = cached {
-                        pending = Some(info);
-                        deadline = Some(Instant::now() + delay);
-                    }
-                }
             },
             _ = timer => {
                 deadline = None;
                 if let Some(info) = pending.take() {
                     if send(SELECTION_CHANGED, info.params()) {
                         last_sent = Some(info);
+                        *last_sent_at.lock().unwrap() = Some(Instant::now());
                     }
                 }
             }
@@ -295,22 +314,56 @@ mod tests {
         tokio::time::advance(Duration::from_millis(400)).await;
         tokio::task::yield_now().await;
         assert!(rx.try_recv().is_ok());
-        tracker.replay_after(Duration::from_millis(500));
+        // The replay goes to the new client's sender only.
+        let (send2, mut rx2) = capture();
+        tracker.replay_to(Duration::from_millis(500), send2);
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(400)).await;
         tokio::task::yield_now().await;
-        assert!(rx.try_recv().is_err(), "not before the replay delay");
+        assert!(rx2.try_recv().is_err(), "not before the replay delay");
         tokio::time::advance(Duration::from_millis(200)).await;
         tokio::task::yield_now().await;
-        let (_, params) = rx.try_recv().expect("replayed frame");
+        let (_, params) = rx2.try_recv().expect("replayed frame");
         assert_eq!(params["text"], "sel");
+        assert!(rx.try_recv().is_err(), "existing clients get no repeat");
+        // De-duplication state is untouched: the same selection is still not re-sent.
+        tracker.update(info(5, "sel"));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(400)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replay_is_skipped_after_a_broadcast() {
+        let (send, mut rx) = capture();
+        let tracker = SelectionTracker::spawn_with(Arc::clone(&send), Duration::from_millis(300));
+        tracker.update(info(1, "old"));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(400)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_ok());
+        // New client connects, then the selection changes before the replay fires:
+        // the broadcast already reached it, so no replay follows.
+        let (send2, mut rx2) = capture();
+        tracker.replay_to(Duration::from_millis(500), send2);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tracker.update(info(2, "new"));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(350)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_ok(), "broadcast of the change");
+        tokio::time::advance(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
+        assert!(rx2.try_recv().is_err(), "no replay after a broadcast");
     }
 
     #[tokio::test(start_paused = true)]
     async fn nothing_to_replay_without_cache() {
         let (send, mut rx) = capture();
-        let tracker = SelectionTracker::spawn_with(send, Duration::from_millis(300));
-        tracker.replay_after(Duration::from_millis(500));
+        let tracker = SelectionTracker::spawn_with(Arc::clone(&send), Duration::from_millis(300));
+        tracker.replay_to(Duration::from_millis(500), send);
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;

@@ -156,13 +156,16 @@ async fn proposal_opens_as_split_and_close_tab_tears_it_down() -> anyhow::Result
         Some(file_path.as_path()),
         "proposal must not alias the real file"
     );
-    assert!(right
-        .path()
-        .unwrap()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .ends_with(".rs"));
+    // `✻ <file> [<pid or #N>]`: no pid was announced by this fake client.
+    assert_eq!(
+        right.path().unwrap().file_name().unwrap().to_string_lossy(),
+        format!(
+            "\u{273B} {} [#1]",
+            file_path.file_name().unwrap().to_string_lossy()
+        )
+    );
+    assert_eq!(view.client.id, 1);
+    assert_eq!(view.client.pid, None);
     assert_eq!(
         right.language_name(),
         Some("rust"),
@@ -320,9 +323,10 @@ async fn proposal_opens_as_split_and_close_tab_tears_it_down() -> anyhow::Result
     assert!(!app.editor.documents.contains_key(&right));
     assert!(
         !file_path
-            .with_file_name(
-                "\u{273B} ".to_string() + file_path.file_name().unwrap().to_str().unwrap()
-            )
+            .with_file_name(format!(
+                "\u{273B} {} [#1]",
+                file_path.file_name().unwrap().to_str().unwrap()
+            ))
             .exists(),
         ":w must not create the proposal file"
     );

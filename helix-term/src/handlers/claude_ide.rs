@@ -38,8 +38,9 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         }
         // Tear the rest down outside of `close_document`.
         let tab_name = diff.tab_name.clone();
+        let client_id = diff.client.id;
         crate::job::dispatch_blocking(move |editor, _| {
-            crate::application::Application::claude_close_diff_split(editor, &tab_name);
+            crate::application::Application::claude_close_diff_split(editor, client_id, &tab_name);
         });
         Ok(())
     });

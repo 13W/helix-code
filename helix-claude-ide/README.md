@@ -36,7 +36,7 @@ When the CLI is upgraded, re-check in this order:
    | `getDiagnostics {uri}` / `{}` | baseline before an Edit/Write (500 ms budget) and right after it (2 s) | JSON array `[{uri, linesInFile?, diagnostics:[{message, severity, range, source?, code?}]}]` |
    | `openDiff {old_file_path, new_file_path, new_file_contents, tab_name}` | only while asking permission for Edit/Write (permission mode `default`) with `diffTool == "auto"` (global config default) | `["FILE_SAVED", <contents>]` or `["DIFF_REJECTED", <tab_name>]`; blocks until decided |
    | `close_tab {tab_name}` | after the terminal prompt was answered, on abort, on exit | always `TAB_CLOSED` |
-   | `set_permission_mode {mode}` | when the permission mode changes (**not in the spec**; errors are swallowed) | `-32602 Tool not found` — harmless |
+   | `set_permission_mode {mode}` | when the permission mode changes (**not in the spec**; errors are swallowed) | `OK`; the mode is stored per connection and shown by `:claude-ide-status` (not published in `tools/list`) |
 
    Tools the extension registers but the CLI never calls (`openFile`,
    `getOpenEditors`, `getCurrentSelection`, `getLatestSelection`,
@@ -49,8 +49,16 @@ When the CLI is upgraded, re-check in this order:
 ## Observed CLI behaviour that differs from the spec
 
 - The CLI **auto-reconnects** after the WebSocket closes (backoff 1 s, 2 s, …);
-  the spec says it does not. Two CLIs started in the same workspace therefore
-  evict each other back and forth for a while (the server keeps one client).
+  the spec says it does not. The VS Code extension keeps a single client and
+  evicts the previous one, which with auto-reconnect makes two CLIs in one
+  workspace evict each other in a loop — so this server deliberately deviates:
+  up to `max-clients` (default 4) connections coexist, and further upgrades are
+  refused with HTTP 503 `too many clients` *before* the WebSocket handshake
+  (the CLI's finite retries then give up). Every tool call carries the
+  `ClientId` it came from; `openDiff` proposals are keyed per client so that
+  one CLI's `closeAllDiffTabs` (sent at the start of each of its turns) never
+  rejects another CLI's proposal; `selection_changed` is broadcast, the 500 ms
+  replay is per connection, `at_mentioned` is addressed to one client.
 - `openDiff` is part of the *permission* flow, so it never appears in
   `acceptEdits`, `plan` or `bypassPermissions` modes.
 - The CLI calls `set_permission_mode`, which the spec does not list.
@@ -62,12 +70,14 @@ When the CLI is upgraded, re-check in this order:
 |---|---|
 | `src/lockfile.rs` | `<configDir>/ide/<port>.lock` (0700 / 0600) |
 | `src/port.rs` | random port in `10000..=65535`, ≤ 50 bind attempts |
-| `src/transport.rs` | axum WebSocket server, auth, single client, one JSON-RPC message per frame, each request on its own task |
+| `src/clients.rs` | table of connected clients: `ClientId`, pid from `ide_connected`, permission mode, fan-out |
+| `src/transport.rs` | axum WebSocket server, auth, `max-clients` limit (503), one JSON-RPC message per frame, each request on its own task |
 | `src/jsonrpc.rs` | minimal JSON-RPC 2.0 types (no MCP SDK) |
 | `src/server.rs` | `initialize`, `ping`, `tools/list`, `tools/call` dispatch |
 | `src/tools.rs` | published tool schemas, argument validation, `ToolHandler` trait |
 | `src/handler.rs` | `EditorHandler`: forwards tools to Helix over the `McpCommand` channel |
-| `src/diff.rs` | registry of pending `openDiff` proposals |
+| `src/diff.rs` | registry of pending `openDiff` proposals, keyed by `(ClientId, tab_name)` |
+| `src/procinfo.rs` | cwd of a pid for `:claude-ide-status` (Linux only) |
 | `src/diagnostics.rs` | `file://` URI ↔ path, VS Code-shaped diagnostics JSON |
 | `src/notify.rs` | `selection_changed` / `at_mentioned` |
 | `examples/serve.rs` | stand-alone server for interoperability checks (`claude --ide` against it) |
@@ -79,6 +89,7 @@ When the CLI is upgraded, re-check in this order:
 cargo test -p helix-claude-ide                                   # unit + WebSocket-level tests
 cargo test -p helix-term --features integration --test claude_ide_integration
 cargo test -p helix-term --features integration --test claude_ide_split
+cargo test -p helix-term --features integration --test claude_ide_multi     # several CLIs
 ```
 
 The manual acceptance script lives in [`docs/claude-ide/acceptance.md`](../docs/claude-ide/acceptance.md).
