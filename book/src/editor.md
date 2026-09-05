@@ -467,10 +467,10 @@ wrap-indicator = ""  # set wrap-indicator to "" to hide it
 
 ### `[editor.claude-ide]` Section
 
-Options for the Claude Code IDE integration: a local server that lets the
-`claude` CLI (`claude --ide`, or `/ide` inside a session) use Helix as its
-editor — review proposed edits, receive LSP diagnostics and see the current
-selection. The server can also be started per launch with `--claude-ide`
+Options for the [Claude Code integration](./claude-code.md): a local server
+that lets the `claude` CLI (`claude --ide`, or `/ide` inside a session) use
+Helix as its editor — review proposed edits, receive LSP diagnostics and see
+the current selection. The server can also be started per launch with `--claude-ide`
 (and `--claude-ide-port`, `--claude-ide-name`) or at runtime with
 `:claude-ide-start`; `:claude-ide-status` and `:claude-ide-stop` inspect and
 stop it. `:claude-mention` inserts the current file (with the selected line
