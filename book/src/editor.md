@@ -473,7 +473,8 @@ editor — review proposed edits, receive LSP diagnostics and see the current
 selection. The server can also be started per launch with `--claude-ide`
 (and `--claude-ide-port`, `--claude-ide-name`) or at runtime with
 `:claude-ide-start`; `:claude-ide-status` and `:claude-ide-stop` inspect and
-stop it.
+stop it. `:claude-mention` inserts the current file (with the selected line
+range, e.g. `@src/main.rs#L10-15`) into the connected CLI's prompt.
 
 | Key | Description | Default |
 |---|---|---|

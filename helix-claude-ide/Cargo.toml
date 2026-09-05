@@ -25,5 +25,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "test-util"] }
 tokio-tungstenite = "0.29"

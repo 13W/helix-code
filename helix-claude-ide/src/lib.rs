@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod handler;
 pub mod jsonrpc;
 pub mod lockfile;
+pub mod notify;
 pub mod port;
 pub mod server;
 pub mod tools;

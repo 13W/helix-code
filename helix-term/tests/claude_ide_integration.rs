@@ -165,6 +165,38 @@ async fn claude_ide_server_lifecycle() -> anyhow::Result<()> {
     let files: Value = serde_json::from_str(text)?;
     assert!(files.as_array().unwrap().iter().any(|f| f["uri"] == uri));
 
+    // Moving the selection in the editor produces a debounced
+    // `selection_changed` notification (PROTO §6.1).
+    {
+        let (view, doc) = helix_view::current!(app.editor);
+        doc.set_selection(view.id, helix_core::Selection::single(0, 12));
+    }
+    let note = with_loop(&mut app, async {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await?
+                .unwrap()?;
+            if let Message::Text(text) = msg {
+                let value: Value = serde_json::from_str(text.as_str())?;
+                if value["method"] == "selection_changed" {
+                    return Ok(value);
+                }
+            }
+        }
+    })
+    .await?;
+    assert_eq!(
+        note["params"]["filePath"].as_str().unwrap(),
+        file_path.to_string_lossy()
+    );
+    assert_eq!(note["params"]["fileUrl"], uri);
+    assert_eq!(note["params"]["text"], "fn main() {}");
+    assert_eq!(
+        note["params"]["selection"],
+        json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 12}, "isEmpty": false})
+    );
+    assert!(note.get("id").is_none(), "notifications carry no id");
+
     // Closing the editor stops the server and removes the lock file.
     let errs = app.close().await;
     assert!(errs.is_empty(), "close() reported errors: {errs:?}");

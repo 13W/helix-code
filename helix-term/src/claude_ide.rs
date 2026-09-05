@@ -5,11 +5,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail};
+use arc_swap::ArcSwapOption;
 use helix_claude_ide::{EditorHandler, Session, SharedHandler};
 use helix_view::Editor;
 
 /// Lock file of the running server, for the panic hook and `process::exit` paths.
 static LOCK_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Handler of the running server, reachable from event hooks that only see a
+/// `Document` (selection changes) and cannot get at `Editor::claude_ide`.
+static CURRENT_HANDLER: ArcSwapOption<EditorHandler> = ArcSwapOption::const_empty();
+
+/// Handler of the running IDE server, if any.
+pub fn current_handler() -> Option<Arc<EditorHandler>> {
+    CURRENT_HANDLER.load_full()
+}
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// The single workspace folder advertised to the CLI: the workspace root
@@ -59,6 +68,7 @@ pub fn start<'e>(
 
     *LOCK_PATH.lock().unwrap() = Some(handle.lock_path().to_path_buf());
     install_panic_hook();
+    CURRENT_HANDLER.store(Some(Arc::clone(&handler)));
 
     editor.claude_ide = Some(Session { handle, handler });
     Ok(editor.claude_ide.as_ref().unwrap())
@@ -67,7 +77,11 @@ pub fn start<'e>(
 /// Detach the running session from the editor; the caller must finish it
 /// with [`stop_session`].
 pub fn stop(editor: &mut Editor) -> Option<Session> {
-    editor.claude_ide.take()
+    let session = editor.claude_ide.take();
+    if session.is_some() {
+        CURRENT_HANDLER.store(None);
+    }
+    session
 }
 
 /// Close the client, stop the server and delete the lock file.
