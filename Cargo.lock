@@ -2234,6 +2234,7 @@ dependencies = [
  "kstring",
  "libc",
  "log",
+ "once_cell",
  "parking_lot",
  "quickcheck",
  "rustix 1.1.4",
