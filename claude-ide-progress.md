@@ -27,7 +27,7 @@
 | `cargo test -p helix-term --features integration --test integration` | **предсуществующее падение**: `test::auto_pairs::append_basic` (и, по устройству харнесса, все тесты с несколькими `Application` в одном процессе) — второй `Application` никогда не становится idle, тест висит до SIGTERM (`expected app to exit: false != true`). Воспроизведено (а) на HEAD, (б) на HEAD с отключёнными хуками claude-ide, (в) **на базовом коммите `4a5447714`** (исходники подставлены в рабочее дерево, тот же тест — та же ошибка). К изменениям T0–T7 не относится. |
 | `cargo clippy` по `helix-claude-ide`, `helix-view`, `helix-term` | без новых предупреждений в добавленном коде |
 
-### T8 · доработки после живой проверки в Helix (`<T8b>`)
+### T8 · доработки после живой проверки в Helix (`a8c1fea82`)
 
 Проверено из этой же сессии `claude` (pid 12636) против `hx --claude-ide` пользователя: prompt-режим (Apply → `FILE_SAVED`, post-edit `getDiagnostics` вернул CLI диагностики Codebook по новой строке) и split-режим (`✻ claude-ide-ideas.md [12636]`, `:claude-diff-accept`). Два замечания исправлены:
 
