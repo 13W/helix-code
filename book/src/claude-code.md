@@ -73,8 +73,10 @@ default permission mode), the proposal is shown in Helix according to
 - **`split`**: a vertical split with the current file on the left (read-only
   while the proposal is open; the gutter marks what would change) and the
   proposal on the right in an editable buffer named `✻ <file> [<pid>]`
-  (`[#N]` before the CLI has announced its pid). Review, edit the right
-  buffer if you like, then decide:
+  (`[#N]` before the CLI has announced its pid). Both cursors start on the
+  first changed line and the status line says how many changes there are;
+  the proposal buffer is never reported to the CLI as a file. Review, edit
+  the right buffer if you like, then decide:
 
   | Action | Command |
   |---|---|

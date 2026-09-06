@@ -822,6 +822,7 @@ impl Application {
         }
 
         let old = std::fs::read_to_string(&old_path).unwrap_or_default();
+        let hunks = Self::claude_hunk_starts(&old, &new_contents);
         let (left, left_is_scratch) = if old_path.exists() {
             match editor.open(&old_path, Action::VerticalSplit) {
                 Ok(id) => (id, false),
@@ -894,11 +895,52 @@ impl Application {
             views: vec![left_view, right_view],
             reply,
         });
+
+        // Put both cursors on the first change and centre it: the gutter
+        // marks alone are easy to miss when the change is far from the top.
+        if let Some(&(old_line, new_line)) = hunks.first() {
+            for (view_id, doc_id, line) in [(left_view, left, old_line), (right_view, right, new_line)]
+            {
+                let view = editor.tree.get(view_id);
+                let Some(doc) = editor.documents.get_mut(&doc_id) else {
+                    continue;
+                };
+                let line = line.min(doc.text().len_lines().saturating_sub(1));
+                let pos = doc.text().line_to_char(line);
+                doc.set_selection(view.id, helix_core::Selection::point(pos));
+                helix_view::align_view(doc, view, helix_view::Align::Center);
+            }
+        }
+        let where_ = match hunks.as_slice() {
+            [] => "no changes".to_string(),
+            [(_, line)] => format!("1 change at line {}", line + 1),
+            [(_, line), ..] => format!("{} changes, first at line {}", hunks.len(), line + 1),
+        };
         editor.set_status(format!(
-            "Claude Code ({}) proposal for {}: :claude-diff-accept / :claude-diff-reject (or :w / :bc on the right buffer)",
+            "Claude Code ({}) proposal for {} ({where_}): :claude-diff-accept / :claude-diff-reject (or :w / :bc on the right buffer)",
             client.label(),
             helix_stdx::path::get_relative_path(&new_path).display()
         ));
+    }
+
+    /// Start lines `(old, new)` of every hunk between `old` and `new`
+    /// (0-indexed; contiguous delete+insert pairs count once).
+    fn claude_hunk_starts(old: &str, new: &str) -> Vec<(usize, usize)> {
+        use similar::{DiffTag, TextDiff};
+        let diff = TextDiff::from_lines(old, new);
+        let mut starts = Vec::new();
+        let mut last_end: Option<(usize, usize)> = None;
+        for op in diff.ops() {
+            if op.tag() == DiffTag::Equal {
+                continue;
+            }
+            let (o, n) = (op.old_range(), op.new_range());
+            if last_end != Some((o.start, n.start)) {
+                starts.push((o.start, n.start));
+            }
+            last_end = Some((o.end, n.end));
+        }
+        starts
     }
 
     /// Whether a compositor layer with `id` (e.g. a picker) is currently open.
@@ -914,7 +956,10 @@ impl Application {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "proposal".to_string());
-        path.with_file_name(format!("\u{273B} {name} [{label}]"))
+        path.with_file_name(format!(
+            "{}{name} [{label}]",
+            crate::claude_ide::PROPOSAL_PREFIX
+        ))
     }
 
     /// Tear down a split proposal: restore the left document, close the

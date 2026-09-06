@@ -72,9 +72,12 @@ pub fn focused_selection(editor: &Editor) -> Option<SelectionInfo> {
 /// Helix has no empty selections: a bare cursor is a one-character range.
 /// Such ranges are reported as an empty selection at the cursor, so that the
 /// CLI does not show "1 line selected" while the user merely moves around.
-/// Scratch buffers (no path) are skipped.
+/// Scratch buffers (no path) and Claude Code proposal buffers are skipped.
 pub fn selection_info(doc: &Document, view: ViewId) -> Option<SelectionInfo> {
     let path = doc.path()?;
+    if crate::claude_ide::is_proposal_path(path) {
+        return None;
+    }
     let selection = doc.selections().get(&view)?;
     let text = doc.text().slice(..);
     let range = selection.primary();

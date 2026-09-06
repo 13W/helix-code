@@ -3403,6 +3403,9 @@ fn claude_mention(
         .path()
         .ok_or_else(|| anyhow::anyhow!("current buffer has no file path"))?
         .to_path_buf();
+    if crate::claude_ide::is_proposal_path(&path) {
+        anyhow::bail!("this buffer is a Claude Code proposal, not a file; mention the target file instead");
+    }
     let lines = crate::handlers::claude_ide::selection_info(doc, view.id)
         .and_then(|info| info.line_span());
     let name = doc.display_name().to_string();
