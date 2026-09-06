@@ -179,6 +179,40 @@ async fn proposal_opens_as_split_and_close_tab_tears_it_down() -> anyhow::Result
     assert_eq!(session.handler.pending_diff_count(), 1);
     // Focus ended on the right (proposal) view.
     assert_eq!(app.editor.tree.get(app.editor.tree.focus).doc, view.right);
+    // Both cursors sit on the first change (the added line 2).
+    let right_line = right
+        .selection(view.views[1])
+        .primary()
+        .cursor_line(right.text().slice(..));
+    assert_eq!(right_line, 1, "right cursor on the added line");
+    let left_line = left
+        .selection(view.views[0])
+        .primary()
+        .cursor_line(left.text().slice(..));
+    assert_eq!(left_line, 1, "left cursor where the insertion goes");
+    // The proposal buffer is never reported to the CLI as a file.
+    let leaked = with_loop(&mut app, async {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let value: Value = serde_json::from_str(text.as_str())?;
+                    if value["method"] == "selection_changed"
+                        && value["params"]["filePath"]
+                            .as_str()
+                            .is_some_and(|p| p.contains('\u{273B}'))
+                    {
+                        return Ok(Some(value));
+                    }
+                }
+                Ok(Some(Ok(_))) => {}
+                _ => return Ok(None),
+            }
+        }
+    })
+    .await?;
+    assert!(leaked.is_none(), "proposal buffer leaked as selection_changed: {leaked:?}");
 
     // Closing a *window* (:q) leaves the proposal pending.
     app.editor.close(app.editor.tree.focus);

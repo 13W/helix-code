@@ -120,6 +120,18 @@ fn install_panic_hook() {
 
 // ── split proposals (`diff-mode = "split"`) ──────────────────────────────────
 
+/// File-name prefix of the right-hand proposal buffer (`✻ <file> [<pid>]`).
+pub const PROPOSAL_PREFIX: &str = "\u{273B} ";
+
+/// Whether `path` names a Claude Code proposal buffer rather than a real
+/// file. Such buffers are never reported to the CLI (`selection_changed`,
+/// `:claude-mention`): the CLI would treat the name as an existing file.
+pub fn is_proposal_path(path: &std::path::Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy().starts_with(PROPOSAL_PREFIX))
+        .unwrap_or(false)
+}
+
 /// Proposal shown as a split that owns `doc_id` (left or right side).
 pub fn split_for_doc(editor: &Editor, doc_id: DocumentId) -> Option<ClaudeDiffView> {
     editor.claude_diff_view_for_doc(doc_id).cloned()
