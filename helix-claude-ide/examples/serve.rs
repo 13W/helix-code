@@ -4,6 +4,7 @@
 //! ```text
 //! cargo run -p helix-claude-ide --example serve            # serves the cwd
 //! cargo run -p helix-claude-ide --example serve -- /path   # serves /path
+//! MAX_CLIENTS=1 cargo run -p helix-claude-ide --example serve  # connection limit
 //! ```
 //!
 //! Then, in that directory: `claude --ide` (or `/ide` inside a session).
@@ -67,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
     let workspace = workspace.canonicalize()?;
-    let config = Config::new(workspace.clone(), "Helix (example)");
+    let mut config = Config::new(workspace.clone(), "Helix (example)");
+    if let Some(max) = std::env::var("MAX_CLIENTS").ok().and_then(|v| v.parse().ok()) {
+        config.max_clients = max;
+    }
     let handle = helix_claude_ide::start(config, Arc::new(LoggingHandler)).await?;
     eprintln!(
         "serving {} on ws://127.0.0.1:{} — lock file {}",
