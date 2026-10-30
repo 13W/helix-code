@@ -786,7 +786,7 @@ impl Client {
                         symbol_kind: Some(lsp::SymbolKindCapability {
                             value_set: Some(lsp::SymbolKind::all()),
                         }),
-                        hierarchical_document_symbol_support: Some(false),
+                        hierarchical_document_symbol_support: Some(true),
                         ..Default::default()
                     }),
                     synchronization: Some(lsp::TextDocumentSyncClientCapabilities {

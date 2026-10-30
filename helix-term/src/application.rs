@@ -2842,7 +2842,7 @@ impl Application {
                         .tree
                         .views()
                         .find(|(v, _)| v.doc == doc_id)
-                        .map(|(v, _)| (v.id, v.inner_height()))
+                        .map(|(v, _)| (v.id, v.inner_height(&self.editor.documents[&v.doc])))
                         .unwrap_or_else(|| {
                             let fv = self.editor.tree.focus;
                             let h = self
@@ -2850,7 +2850,7 @@ impl Application {
                                 .tree
                                 .views()
                                 .find(|(v, _)| v.id == fv)
-                                .map(|(v, _)| v.inner_height())
+                                .map(|(v, _)| v.inner_height(&self.editor.documents[&v.doc]))
                                 .unwrap_or(24);
                             (fv, h)
                         });
