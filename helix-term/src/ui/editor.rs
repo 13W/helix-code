@@ -203,6 +203,10 @@ impl EditorView {
             .diagnostics_handler
             .show_cursorline_diagnostics(doc, view.id);
         let inline_diagnostic_config = config.inline_diagnostics.prepare(width, enable_cursor_line);
+        // Before the diagnostics, so an end-of-line diagnostic moves past the summary.
+        if !doc.folded_ranges(view.id).is_empty() {
+            decorations.add_decoration(text_decorations::FoldSummary::new(doc, view, theme));
+        }
         decorations.add_decoration(InlineDiagnostics::new(
             doc,
             theme,

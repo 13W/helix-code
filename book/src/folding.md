@@ -4,7 +4,9 @@ Fold code to keep long functions and other blocks out of the way while you work.
 A closed fold shows a selectable `…` in place of its body. Syntax folds keep
 closing braces, brackets, and parentheses visible with the rest of their line,
 so a folded region can look like `pub struct Editor {…}`, `[…],`, or
-`call!(…);`. You can select and edit the closing tokens normally.
+`call!(…);`. You can select and edit the closing tokens normally. After the
+end of a line with closed folds, Helix shows how many lines they hide, for
+example `fn main() {…}  4 lines`.
 
 Selection folds and syntax regions without paired closing tokens fold whole
 lines. Folding changes the view, leaving the document text and undo history
@@ -43,4 +45,4 @@ Selections still refer to the underlying document, so an operation on a
 selection spanning a fold includes its hidden text. Moving horizontally or by
 words into hidden text reveals it. Folding is not saved between editor sessions.
 
-Themes can style the ellipsis with `ui.virtual.fold`.
+Themes can style the ellipsis and the hidden-line count with `ui.virtual.fold`.
