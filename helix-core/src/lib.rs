@@ -75,3 +75,6 @@ pub use transaction::{Assoc, Change, ChangeSet, Deletion, Operation, Transaction
 pub use uri::Uri;
 
 pub use tree_house::Language;
+
+#[cfg(test)]
+mod folding_tests;

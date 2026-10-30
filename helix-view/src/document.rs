@@ -1,3 +1,6 @@
+mod folding;
+pub use folding::FoldAction;
+
 use anyhow::{anyhow, bail, Error};
 use arc_swap::access::DynAccess;
 use arc_swap::ArcSwap;
@@ -1498,6 +1501,9 @@ impl Document {
         loader: &syntax::Loader,
     ) {
         self.language = language_config;
+        for view_data in self.view_data.values_mut() {
+            view_data.folds = Default::default();
+        }
         self.syntax = self.language.as_ref().and_then(|config| {
             Syntax::new(self.text.slice(..), config.language(), loader)
                 .map_err(|err| {
@@ -1532,6 +1538,7 @@ impl Document {
         // TODO: use a transaction?
         self.selections
             .insert(view_id, selection.ensure_invariants(self.text().slice(..)));
+        self.reveal_folds(view_id);
         helix_event::dispatch(SelectionDidChange {
             doc: self,
             view: view_id,
@@ -1609,6 +1616,7 @@ impl Document {
                     view_id,
                     selection.clone().ensure_invariants(self.text.slice(..)),
                 );
+                self.reveal_folds(view_id);
                 helix_event::dispatch(SelectionDidChange {
                     doc: self,
                     view: view_id,
@@ -1629,10 +1637,14 @@ impl Document {
                 .ensure_invariants(self.text.slice(..));
         }
 
-        for view_data in self.view_data.values_mut() {
+        for (view, view_data) in self.view_data.iter_mut() {
             view_data.view_position.anchor = transaction
                 .changes()
                 .map_pos(view_data.view_position.anchor, Assoc::Before);
+            view_data.folds.apply_changes(changes);
+            if let Some(selection) = self.selections.get(view) {
+                view_data.folds.reveal(selection, self.text.slice(..));
+            }
         }
 
         // generate revert to savepoint
@@ -1773,6 +1785,7 @@ impl Document {
                 view_id,
                 selection.clone().ensure_invariants(self.text.slice(..)),
             );
+            self.reveal_folds(view_id);
             helix_event::dispatch(SelectionDidChange {
                 doc: self,
                 view: view_id,
@@ -2740,6 +2753,7 @@ impl Document {
 #[derive(Debug, Default)]
 pub struct ViewData {
     view_position: ViewPosition,
+    folds: folding::Folds,
 }
 
 #[derive(Clone, Debug)]

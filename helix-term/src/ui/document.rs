@@ -22,7 +22,8 @@ pub struct LinePos {
     /// Indicates whether the given visual line
     /// is the first visual line of the given document line
     pub first_visual_line: bool,
-    /// The line index of the document line that contains the given visual line
+    /// Source line beginning the display block. The visible suffix of a closed
+    /// fold shares its header's line number, including when it wraps.
     pub doc_line: usize,
     /// Vertical offset from the top of the inner view area
     pub visual_line: u16,
@@ -35,7 +36,7 @@ pub fn render_document(
     doc: &Document,
     offset: ViewPosition,
     doc_annotations: &TextAnnotations,
-    syntax_highlighter: Option<Highlighter<'_>>,
+    syntax_highlighters: Vec<(usize, Highlighter<'_>)>,
     overlay_highlights: Vec<syntax::OverlayHighlights>,
     theme: &Theme,
     decorations: DecorationManager,
@@ -53,7 +54,7 @@ pub fn render_document(
         offset.anchor,
         &doc.text_format(viewport.width, Some(theme)),
         doc_annotations,
-        syntax_highlighter,
+        syntax_highlighters,
         overlay_highlights,
         theme,
         decorations,
@@ -61,13 +62,16 @@ pub fn render_document(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `syntax_highlighters` cover consecutive visible segments of the text, each
+/// paired with the char index where it takes over from the previous one. Text
+/// hidden by folds between segments is never highlighted.
 pub fn render_text(
     renderer: &mut TextRenderer,
     text: RopeSlice<'_>,
     anchor: usize,
     text_fmt: &TextFormat,
     text_annotations: &TextAnnotations,
-    syntax_highlighter: Option<Highlighter<'_>>,
+    syntax_highlighters: Vec<(usize, Highlighter<'_>)>,
     overlay_highlights: Vec<syntax::OverlayHighlights>,
     theme: &Theme,
     mut decorations: DecorationManager,
@@ -79,7 +83,7 @@ pub fn render_text(
     let mut formatter =
         DocumentFormatter::new_at_prev_checkpoint(text, text_fmt, text_annotations, anchor);
     let mut syntax_highlighter =
-        SyntaxHighlighter::new(syntax_highlighter, text, theme, renderer.text_style);
+        SyntaxHighlighter::new(syntax_highlighters, text, theme, renderer.text_style);
     let mut overlay_highlighter = OverlayHighlighter::new(overlay_highlights, theme);
 
     let mut last_line_pos = LinePos {
@@ -125,8 +129,8 @@ pub fn render_text(
                 decorations.render_virtual_lines(renderer, last_line_pos, last_line_end)
             }
             last_line_pos = LinePos {
-                first_visual_line: grapheme.line_idx != last_line_pos.doc_line,
-                doc_line: grapheme.line_idx,
+                first_visual_line: grapheme.block_line_idx != last_line_pos.doc_line,
+                doc_line: grapheme.block_line_idx,
                 visual_line: grapheme.visual_pos.row as u16,
             };
             decorations.decorate_line(renderer, last_line_pos);
@@ -148,6 +152,11 @@ pub fn render_text(
             GraphemeStyle {
                 syntax_style: style,
                 overlay_style: Style::default(),
+            }
+        } else if text_annotations.conceal_at(grapheme.char_idx).is_some() {
+            GraphemeStyle {
+                syntax_style: renderer.text_style.patch(theme.get("ui.virtual.fold")),
+                overlay_style: overlay_highlighter.style,
             }
         } else {
             GraphemeStyle {
@@ -486,6 +495,8 @@ impl<'a> TextRenderer<'a> {
 
 struct SyntaxHighlighter<'h, 'r, 't> {
     inner: Option<Highlighter<'h>>,
+    /// Highlighters of later visible segments with the char index where each takes over.
+    segments: std::vec::IntoIter<(usize, Highlighter<'h>)>,
     text: RopeSlice<'r>,
     /// The character index of the next highlight event, or `usize::MAX` if the highlighter is
     /// finished.
@@ -497,13 +508,15 @@ struct SyntaxHighlighter<'h, 'r, 't> {
 
 impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
     fn new(
-        inner: Option<Highlighter<'h>>,
+        highlighters: Vec<(usize, Highlighter<'h>)>,
         text: RopeSlice<'r>,
         theme: &'t Theme,
         text_style: Style,
     ) -> Self {
+        let mut segments = highlighters.into_iter();
         let mut highlighter = Self {
-            inner,
+            inner: segments.next().map(|(_, highlighter)| highlighter),
+            segments,
             text,
             pos: 0,
             theme,
@@ -514,7 +527,15 @@ impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
         highlighter
     }
 
+    fn next_segment_start(&self) -> usize {
+        self.segments
+            .as_slice()
+            .first()
+            .map_or(usize::MAX, |(start, _)| *start)
+    }
+
     fn update_pos(&mut self) {
+        let next_segment = self.next_segment_start();
         self.pos = self
             .inner
             .as_ref()
@@ -527,10 +548,19 @@ impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
                         .byte_to_char(self.text.ceil_char_boundary(next_byte_idx as usize))
                 })
             })
-            .unwrap_or(usize::MAX);
+            .unwrap_or(usize::MAX)
+            .min(next_segment);
     }
 
     fn advance(&mut self) {
+        if self.pos >= self.next_segment_start() {
+            // Start the next segment from plain text; its highlighter restores
+            // the scopes that enclose it.
+            self.inner = self.segments.next().map(|(_, highlighter)| highlighter);
+            self.style = self.text_style;
+            self.update_pos();
+            return;
+        }
         let Some(highlighter) = self.inner.as_mut() else {
             return;
         };

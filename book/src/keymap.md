@@ -206,6 +206,14 @@ useful when you're simply looking over text and not actively editing it.
 | `Ctrl-b`, `PageUp`   | Move page up                                              | `page_up`               |
 | `Ctrl-u`             | Move cursor and page half page up                         | `page_cursor_half_up`   |
 | `Ctrl-d`             | Move cursor and page half page down                       | `page_cursor_half_down` |
+| `f` `c`              | Close the innermost syntax fold at each cursor (**TS**)   | `fold_close`            |
+| `f` `o`              | Open the fold at each cursor                              | `fold_open`             |
+| `f` `a`              | Toggle the fold at each cursor (**TS**)                   | `fold_toggle`           |
+| `f` `s`              | Fold the lines covered by each selection                  | `fold_selection`        |
+| `f` `m`              | Close all syntax folds (**TS**)                           | `fold_all`              |
+| `f` `r`              | Open all folds                                            | `unfold_all`            |
+
+`f` opens the folding submenu; see [Code folding](./folding.md).
 
 #### Goto mode
 

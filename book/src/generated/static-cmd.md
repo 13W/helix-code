@@ -260,6 +260,12 @@
 | `align_view_top` | Align view top | normal: `` Zt ``, `` zt ``, select: `` Zt ``, `` zt `` |
 | `align_view_center` | Align view center | normal: `` Zc ``, `` Zz ``, `` zc ``, `` zz ``, select: `` Zc ``, `` Zz ``, `` zc ``, `` zz `` |
 | `align_view_bottom` | Align view bottom | normal: `` Zb ``, `` zb ``, select: `` Zb ``, `` zb `` |
+| `fold_close` | Close the innermost syntax fold | normal: `` Zfc ``, `` zfc ``, select: `` Zfc ``, `` zfc `` |
+| `fold_open` | Open the fold at each cursor | normal: `` Zfo ``, `` zfo ``, select: `` Zfo ``, `` zfo `` |
+| `fold_toggle` | Toggle the fold at each cursor | normal: `` Zfa ``, `` zfa ``, select: `` Zfa ``, `` zfa `` |
+| `fold_selection` | Fold selected lines | normal: `` Zfs ``, `` zfs ``, select: `` Zfs ``, `` zfs `` |
+| `fold_all` | Close all syntax folds | normal: `` Zfm ``, `` zfm ``, select: `` Zfm ``, `` zfm `` |
+| `unfold_all` | Open all folds | normal: `` Zfr ``, `` zfr ``, select: `` Zfr ``, `` zfr `` |
 | `scroll_up` | Scroll view up | normal: `` Zk ``, `` zk ``, `` Z<up> ``, `` z<up> ``, select: `` Zk ``, `` zk ``, `` Z<up> ``, `` z<up> `` |
 | `scroll_down` | Scroll view down | normal: `` Zj ``, `` zj ``, `` Z<down> ``, `` z<down> ``, select: `` Zj ``, `` zj ``, `` Z<down> ``, `` z<down> `` |
 | `match_brackets` | Goto matching bracket | normal: `` mm ``, select: `` mm `` |

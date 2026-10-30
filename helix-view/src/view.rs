@@ -11,6 +11,7 @@ use crate::{
 use helix_core::{
     char_idx_at_visual_offset,
     doc_formatter::TextFormat,
+    movement::{self, Direction},
     text_annotations::TextAnnotations,
     visual_offset_from_anchor, visual_offset_from_block, Position, RopeSlice, Selection,
     Transaction,
@@ -383,14 +384,76 @@ impl View {
     /// visible line and adding the viewport height.
     /// The actual last visible line may be smaller if softwrapping occurs
     /// or virtual text lines are visible
+    /// Closed folds count as their header line only.
     #[inline]
     pub fn estimate_last_doc_line(&self, doc: &Document) -> usize {
         let doc_text = doc.text().slice(..);
-        let line = doc_text.char_to_line(doc.view_offset(self.id).anchor.min(doc_text.len_chars()));
-        // Saturating subs to make it inclusive zero indexing.
-        (line + self.inner_height(doc))
-            .min(doc_text.len_lines())
-            .saturating_sub(1)
+        let conceals = doc.folded_ranges(self.id);
+        let anchor = doc.view_offset(self.id).anchor.min(doc_text.len_chars());
+        if conceals.is_empty() {
+            let line = doc_text.char_to_line(anchor);
+            // Saturating subs to make it inclusive zero indexing.
+            return (line + self.inner_height(doc))
+                .min(doc_text.len_lines())
+                .saturating_sub(1);
+        }
+        let first = self.block_line_at_pos(doc, anchor);
+        movement::document_line_at_offset(
+            doc_text,
+            first,
+            Direction::Forward,
+            self.inner_height(doc).saturating_sub(1),
+            conceals,
+        )
+    }
+
+    /// Source line that begins the display block containing `pos`. The visible
+    /// suffix of a closed fold shares its header's display row.
+    pub fn block_line_at_pos(&self, doc: &Document, pos: usize) -> usize {
+        let text = doc.text().slice(..);
+        let mut annotations = TextAnnotations::default();
+        annotations.set_conceals(doc.folded_ranges(self.id));
+        text.char_to_line(annotations.checkpoint_anchor(text, pos.min(text.len_chars())))
+    }
+
+    /// A whole-line upper bound for the text visible in this view. Folding
+    /// expands the document range; wrapping and virtual lines can only shrink it.
+    pub fn visible_byte_range(&self, doc: &Document) -> std::ops::Range<usize> {
+        let text = doc.text().slice(..);
+        let mut annotations = TextAnnotations::default();
+        annotations.set_conceals(doc.folded_ranges(self.id));
+        let anchor = doc.view_offset(self.id).anchor.min(text.len_chars());
+        let first = text.char_to_line(annotations.checkpoint_anchor(text, anchor));
+        let last = self.estimate_last_doc_line(doc);
+        let end_line = text.char_to_line(annotations.block_end(text, text.line_to_char(last)));
+        text.line_to_byte(first)..text.line_to_byte((end_line + 1).min(text.len_lines()))
+    }
+
+    /// Visible byte ranges with concealed text removed, so syntax queries do not
+    /// traverse hidden bodies on every frame.
+    pub fn visible_byte_ranges(&self, doc: &Document) -> Vec<std::ops::Range<usize>> {
+        let text = doc.text().slice(..);
+        let range = self.visible_byte_range(doc);
+        let mut start = range.start;
+        let mut ranges = Vec::new();
+        for conceal in doc.folded_ranges(self.id) {
+            let hidden_start = text.char_to_byte(conceal.range.start);
+            let hidden_end = text.char_to_byte(conceal.range.end);
+            if hidden_end <= start {
+                continue;
+            }
+            if hidden_start >= range.end {
+                break;
+            }
+            if start < hidden_start {
+                ranges.push(start..hidden_start);
+            }
+            start = hidden_end.min(range.end);
+        }
+        if start < range.end {
+            ranges.push(start..range.end);
+        }
+        ranges
     }
 
     /// Calculates the last non-empty visual line on screen
@@ -471,6 +534,7 @@ impl View {
         theme: Option<&Theme>,
     ) -> TextAnnotations<'a> {
         let mut text_annotations = TextAnnotations::default();
+        text_annotations.set_conceals(doc.folded_ranges(self.id));
 
         if let Some(labels) = doc.jump_labels.get(&self.id) {
             let style = theme.and_then(|t| t.find_highlight("ui.virtual.jump-label"));

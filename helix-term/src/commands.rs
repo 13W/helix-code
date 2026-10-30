@@ -1,9 +1,11 @@
 pub(crate) mod dap;
+pub(crate) mod folding;
 pub(crate) mod lsp;
 pub(crate) mod syntax;
 pub(crate) mod typed;
 
 pub use dap::*;
+pub use folding::*;
 use futures_util::FutureExt;
 use helix_event::status;
 use helix_stdx::{
@@ -564,6 +566,12 @@ impl MappableCommand {
         align_view_top, "Align view top",
         align_view_center, "Align view center",
         align_view_bottom, "Align view bottom",
+        fold_close, "Close the innermost syntax fold",
+        fold_open, "Open the fold at each cursor",
+        fold_toggle, "Toggle the fold at each cursor",
+        fold_selection, "Fold selected lines",
+        fold_all, "Close all syntax folds",
+        unfold_all, "Open all folds",
         scroll_up, "Scroll view up",
         scroll_down, "Scroll view down",
         match_brackets, "Goto matching bracket",
@@ -7331,6 +7339,9 @@ fn jump_to_word(cx: &mut Context, behaviour: Movement) {
     // It's ok though because the extra jump labels will not be rendered.
     let start = text.line_to_char(text.char_to_line(doc.view_offset(view.id).anchor));
     let end = text.line_to_char(view.estimate_last_doc_line(doc) + 1);
+    // Words hidden by closed folds get no labels.
+    let mut conceals = TextAnnotations::default();
+    conceals.set_conceals(doc.folded_ranges(view.id));
 
     let primary_selection = doc.selection(view.id).primary();
     let cursor = primary_selection.cursor(text);
@@ -7351,6 +7362,10 @@ fn jump_to_word(cx: &mut Context, behaviour: Movement) {
         let mut changed = false;
         while cursor_fwd.head < end {
             cursor_fwd = movement::move_next_word_end(text, cursor_fwd, 1);
+            if let Some(conceal) = conceals.conceal_at(cursor_fwd.cursor(text)) {
+                cursor_fwd = Range::point(conceal.range.end);
+                continue;
+            }
             // The cursor is on a word that is atleast two graphemes long and
             // madeup of word characters. The latter condition is needed because
             // move_next_word_end simply treats a sequence of characters from
@@ -7379,6 +7394,10 @@ fn jump_to_word(cx: &mut Context, behaviour: Movement) {
         }
         while cursor_rev.head > start {
             cursor_rev = movement::move_prev_word_start(text, cursor_rev, 1);
+            if let Some(conceal) = conceals.conceal_at(cursor_rev.cursor(text)) {
+                cursor_rev = Range::point(conceal.range.start);
+                continue;
+            }
             // The cursor is on a word that is atleast two graphemes long and
             // madeup of word characters. The latter condition is needed because
             // move_prev_word_start simply treats a sequence of characters from
@@ -7409,6 +7428,7 @@ fn jump_to_word(cx: &mut Context, behaviour: Movement) {
             break;
         }
     }
+    drop(conceals);
     jump_to_label(cx, words, behaviour)
 }
 

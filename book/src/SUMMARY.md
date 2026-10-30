@@ -10,6 +10,7 @@
   - [Surround](./surround.md)
   - [Textobjects](./textobjects.md)
   - [Syntax aware motions](./syntax-aware-motions.md)
+  - [Code folding](./folding.md)
   - [Pickers](./pickers.md)
   - [Jumplist](./jumplist.md)
   - [Keymap](./keymap.md)
@@ -36,3 +37,4 @@
   - [Adding injection queries](./guides/injection.md)
   - [Adding tags queries](./guides/tags.md)
   - [Adding rainbow bracket queries](./guides/rainbow_bracket_queries.md)
+  - [Adding folding queries](./guides/folding.md)

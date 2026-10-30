@@ -1049,7 +1049,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                 offset,
                 // TODO: compute text annotations asynchronously here (like inlay hints)
                 &TextAnnotations::default(),
-                syntax_highlighter,
+                syntax_highlighter.into_iter().map(|h| (0, h)).collect(),
                 overlay_highlights,
                 &cx.editor.theme,
                 decorations,
