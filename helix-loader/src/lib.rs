@@ -135,6 +135,19 @@ pub fn cache_dir() -> PathBuf {
     path
 }
 
+/// Directory for state persisted between sessions (`$XDG_STATE_HOME/helix`). Platforms without
+/// a state directory fall back to `<cache dir>/state`.
+pub fn state_dir() -> PathBuf {
+    let strategy = choose_base_strategy().expect("Unable to find the state directory!");
+    match strategy.state_dir() {
+        Some(mut path) => {
+            path.push("helix");
+            path
+        }
+        None => cache_dir().join("state"),
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     let strategy = choose_base_strategy().expect("Unable to find the data directory!");
     let mut path = strategy.data_dir();

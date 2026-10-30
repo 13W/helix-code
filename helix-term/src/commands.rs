@@ -2522,6 +2522,7 @@ fn search_selection_impl(cx: &mut Context, detect_word_boundaries: bool) {
         .join("|");
 
     let msg = format!("register '{}' set to '{}'", register, &regex);
+    helix_view::persistence::push_history(cx.editor, register, &regex);
     match cx.editor.registers.push(register, regex) {
         Ok(_) => {
             cx.editor.registers.last_search_register = register;
@@ -2562,6 +2563,7 @@ fn make_search_word_bounded(cx: &mut Context) {
     }
 
     let msg = format!("register '{}' set to '{}'", register, &new_regex);
+    helix_view::persistence::push_history(cx.editor, register, &new_regex);
     match cx.editor.registers.push(register, new_regex) {
         Ok(_) => {
             cx.editor.registers.last_search_register = register;

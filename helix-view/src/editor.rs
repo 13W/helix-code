@@ -9,6 +9,7 @@ use crate::{
     handlers::Handlers,
     info::Info,
     input::KeyEvent,
+    persistence::{self, FilePosition, PersistenceConfig},
     register::Registers,
     theme::{self, Theme},
     tree::{self, Tree},
@@ -452,6 +453,8 @@ pub struct Config {
     pub buffer_picker: BufferPickerConfig,
     /// Workspace-trust configuration.
     pub workspace_trust: WorkspaceTrustConfig,
+    /// State kept between sessions.
+    pub persistence: PersistenceConfig,
 }
 
 /// User-facing configuration for `[editor.workspace-trust]`.
@@ -1321,6 +1324,7 @@ impl Default for Config {
             kitty_keyboard_protocol: Default::default(),
             buffer_picker: BufferPickerConfig::default(),
             workspace_trust: WorkspaceTrustConfig::default(),
+            persistence: PersistenceConfig::default(),
         }
     }
 }
@@ -1385,6 +1389,8 @@ pub struct Editor {
     /// Claude Code proposals currently shown as splits (`diff-mode = "split"`).
     pub claude_diff_views: Vec<ClaudeDiffView>,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
+    /// Positions files were last closed with, see [`persistence`].
+    pub file_positions: HashMap<PathBuf, FilePosition>,
 
     pub syn_loader: Arc<ArcSwap<syntax::Loader>>,
     pub theme_loader: Arc<theme::Loader>,
@@ -1542,6 +1548,7 @@ impl Editor {
             claude_ide: None,
             claude_diff_views: Vec::new(),
             breakpoints: HashMap::new(),
+            file_positions: HashMap::new(),
             syn_loader,
             theme_loader,
             last_theme: None,
@@ -2202,6 +2209,7 @@ impl Editor {
     pub fn open(&mut self, path: &Path, action: Action) -> Result<DocumentId, DocumentOpenError> {
         let path = helix_stdx::path::canonicalize(path);
         let id = self.document_id_by_path(&path);
+        let is_new = id.is_none();
 
         let id = if let Some(id) = id {
             id
@@ -2241,11 +2249,16 @@ impl Editor {
         };
 
         self.switch(id, action);
+        // After `switch`, which resets the view offset.
+        if is_new {
+            persistence::restore_position(self, id);
+        }
 
         Ok(id)
     }
 
     pub fn close(&mut self, id: ViewId) {
+        persistence::remember_view(self, id);
         // Remove selections for the closed view on all documents.
         for doc in self.documents_mut() {
             doc.remove_view(id);
@@ -2279,6 +2292,8 @@ impl Editor {
 
         // This will also disallow any follow-up writes
         self.saves.remove(&doc_id);
+
+        persistence::remember_document(self, doc_id);
 
         enum Action {
             Close(ViewId),

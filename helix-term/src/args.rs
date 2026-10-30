@@ -41,10 +41,7 @@ impl Args {
             // Before setting the working directory, resolve all the paths in args.files
             let filename = helix_stdx::path::canonicalize(filename);
 
-            args.files
-                .entry(filename)
-                .and_modify(|positions| positions.push(position))
-                .or_insert_with(|| vec![position]);
+            args.files.entry(filename).or_default().extend(position);
         };
 
         argv.next(); // skip the program, we don't care about that
@@ -162,12 +159,11 @@ impl Args {
         }
 
         if line_number != 0 {
-            if let Some(first_position) = args
-                .files
-                .first_mut()
-                .and_then(|(_, positions)| positions.first_mut())
-            {
-                first_position.row = line_number;
+            if let Some((_, positions)) = args.files.first_mut() {
+                match positions.first_mut() {
+                    Some(first_position) => first_position.row = line_number,
+                    None => positions.push(Position::new(line_number, 0)),
+                }
             }
         }
 
@@ -175,14 +171,15 @@ impl Args {
     }
 }
 
-/// Parse arg into [`PathBuf`] and position.
-pub(crate) fn parse_file(s: &str) -> (PathBuf, Position) {
-    let def = || (PathBuf::from(s), Position::default());
+/// Parse arg into [`PathBuf`] and position, if one is given.
+pub(crate) fn parse_file(s: &str) -> (PathBuf, Option<Position>) {
+    let def = || (PathBuf::from(s), None);
     if Path::new(s).exists() {
         return def();
     }
     split_path_row_col(s)
         .or_else(|| split_path_row(s))
+        .map(|(path, pos)| (path, Some(pos)))
         .unwrap_or_else(def)
 }
 

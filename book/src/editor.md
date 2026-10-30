@@ -24,6 +24,7 @@
 - [`[editor.inline-diagnostics]` Section](#editorinline-diagnostics-section)
 - [`[editor.word-completion]` Section](#editorword-completion-section)
 - [`[editor.workspace-trust]` Section](#editorworkspace-trust-section)
+- [`[editor.persistence]` Section](#editorpersistence-section)
 
 ### `[editor]` Section
 
@@ -591,4 +592,30 @@ level = "servers"
 # Discouraged: skips .helix/ change detection and trusts anything that lands
 # under a matching path. `~` and environment variables are expanded.
 trusted = ["~/src/github.com/me/*"]
+```
+
+### `[editor.persistence]` Section
+
+Keeps editor state between sessions. The state is stored as JSON Lines files in the state
+directory (`$XDG_STATE_HOME/helix`, by default `~/.local/state/helix`): `command-history.jsonl`,
+`search-history.jsonl` and `file-history.jsonl`. Several running instances share these files.
+Each one reads them once, on startup. Delete a file to reset that state.
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `commands` | Keep the command history (`:` register) | `false` |
+| `search` | Keep the search history (`/` register): `/`, `?`, `*`, `s`, `S`, `K`, `Alt-K` | `false` |
+| `old-files` | Reopen a file at the cursor and scroll position it was closed with. A position given on the command line (`file:10`) or to `:open` takes precedence | `false` |
+| `old-files-exclusions` | Glob patterns, matched against absolute paths, of files whose position is never kept | `["**/.git/**", "**/.jj/**", "**/*.jjdescription"]` |
+| `commands-trim` | Number of commands kept | `100` |
+| `search-trim` | Number of searches kept | `100` |
+| `old-files-trim` | Number of files whose position is kept | `100` |
+
+Example:
+
+```toml
+[editor.persistence]
+commands = true
+search = true
+old-files = true
 ```

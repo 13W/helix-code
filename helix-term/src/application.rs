@@ -137,6 +137,7 @@ impl Application {
             handlers,
             workspace_trust,
         );
+        helix_view::persistence::load(&mut editor);
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
         let jobs = Jobs::new();
@@ -164,6 +165,7 @@ impl Application {
             // If there are any more files specified, open them
             if files_it.peek().is_some() {
                 let mut nr_of_files = 0;
+                let mut positioned = false;
                 for (file, pos) in files_it {
                     nr_of_files += 1;
                     if file.is_dir() {
@@ -201,6 +203,10 @@ impl Application {
                         // NOTE: this isn't necessarily true anymore. If
                         // `--vsplit` or `--hsplit` are used, the file which is
                         // opened last is focused on.
+                        // Without a position the file keeps the restored one.
+                        if pos.is_empty() {
+                            continue;
+                        }
                         let view_id = editor.tree.focus;
                         let doc = doc_mut!(editor, &doc_id);
                         let selection = pos
@@ -210,6 +216,7 @@ impl Application {
                             })
                             .collect();
                         doc.set_selection(view_id, selection);
+                        positioned = true;
                     }
                 }
 
@@ -223,9 +230,11 @@ impl Application {
                         if nr_of_files == 1 { "" } else { "s" } // avoid "Loaded 1 files." grammo
                     ));
                     // align the view to center after all files are loaded,
-                    // does not affect views without pos since it is at the top
-                    let (view, doc) = current!(editor);
-                    align_view(doc, view, Align::Center);
+                    // unless every file keeps its restored scroll position
+                    if positioned {
+                        let (view, doc) = current!(editor);
+                        align_view(doc, view, Align::Center);
+                    }
                 }
             } else {
                 editor.new_file(Action::VerticalSplit);
@@ -5124,6 +5133,9 @@ for (agent_id, reply, allow_always_id) in pending {
         //        want to try to run as much cleanup as we can, regardless of
         //        errors along the way
         let mut errs = Vec::new();
+
+        // Views still open when quitting by signal.
+        helix_view::persistence::remember_all(&mut self.editor);
 
         if let Err(err) = self
             .jobs

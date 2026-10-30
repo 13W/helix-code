@@ -2221,6 +2221,7 @@ dependencies = [
  "crossterm",
  "foldhash 0.2.0",
  "futures-util",
+ "globset",
  "helix-acp",
  "helix-claude-ide",
  "helix-core",

@@ -35,6 +35,7 @@ helix-claude-ide = { path = "../helix-claude-ide" }
 
 bitflags.workspace = true
 foldhash.workspace = true
+globset.workspace = true
 anyhow = "1"
 termina = { workspace = true, optional = true }
 
