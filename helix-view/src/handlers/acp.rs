@@ -364,7 +364,6 @@ impl Editor {
 
         let view = self.tree.get_mut(view_id);
         let doc = self.documents.get_mut(&doc_id).unwrap();
-        view.sync_changes(doc);
         if let Err(e) = doc.reload(view, &self.diff_providers, true) {
             log::warn!("ACP: reload failed for {}: {e}", path.display());
             return;

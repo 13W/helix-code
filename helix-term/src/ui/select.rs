@@ -130,7 +130,8 @@ impl<T: Item> Component for Select<T> {
         let inner = Block::bordered().inner(dialog);
 
         // Message with 1-char horizontal padding so text isn't flush with the border.
-        let msg_height = message_height.min(inner.height);
+        // Truncate a tall message so the options menu (and the separator) stay on screen.
+        let msg_height = message_height.min(inner.height.saturating_sub(menu_height + 1));
         let msg_area = Rect::new(
             inner.x + 1,
             inner.y,

@@ -4122,14 +4122,14 @@ impl Application {
                 };
                 let entries: Vec<helix_mcp::JumpEntry> = jump_data
                     .iter()
-                    .filter_map(|(doc_id, selection)| {
+                    .filter_map(|jump| {
                         self.editor
-                            .document(*doc_id)
+                            .document(jump.doc_id)
                             .and_then(|doc| doc.path())
                             .map(|path| {
-                                let doc = self.editor.document(*doc_id).unwrap();
+                                let doc = self.editor.document(jump.doc_id).unwrap();
                                 let text = doc.text().slice(..);
-                                let cursor = selection.primary().cursor(text);
+                                let cursor = jump.selection(doc).primary().cursor(text);
                                 let line = text.char_to_line(cursor);
                                 helix_mcp::JumpEntry {
                                     path: path.to_path_buf(),

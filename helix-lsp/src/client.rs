@@ -617,6 +617,11 @@ impl Client {
             log::info!("Using custom LSP config: {}", config);
         }
 
+        let goto = Some(lsp::GotoCapability {
+            dynamic_registration: Some(false),
+            link_support: Some(true),
+        });
+
         #[allow(deprecated)]
         let params = lsp::InitializeParams {
             process_id: Some(std::process::id()),
@@ -699,10 +704,17 @@ impl Client {
                             ..Default::default()
                         }),
                         completion_item_kind: Some(lsp::CompletionItemKindCapability {
-                            ..Default::default()
+                            value_set: Some(lsp::CompletionItemKind::all()),
                         }),
-                        context_support: None, // additional context information Some(true)
+                        context_support: Some(true),
                         ..Default::default()
+                    }),
+                    declaration: goto,
+                    definition: goto,
+                    type_definition: goto,
+                    implementation: goto,
+                    color_provider: Some(lsp::DocumentColorClientCapabilities {
+                        dynamic_registration: Some(false),
                     }),
                     hover: Some(lsp::HoverClientCapabilities {
                         // if not specified, rust-analyzer returns plaintext marked as markdown but
@@ -790,6 +802,7 @@ impl Client {
                         ..Default::default()
                     }),
                     synchronization: Some(lsp::TextDocumentSyncClientCapabilities {
+                        did_save: Some(true),
                         will_save: Some(true),
                         will_save_wait_until: Some(true),
                         ..Default::default()
